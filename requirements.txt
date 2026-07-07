@@ -1,0 +1,28 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Fish Detection & Counting — Requirements
+# Install: pip install -r requirements.txt
+#
+# NOTE: FastAPI / uvicorn / requests are NOT needed.
+# The backend is a pure Python library (core/) called directly by the UI.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── UI ────────────────────────────────────────────────────────────────────────
+PyQt5==5.15.9
+
+# ── Computer Vision & ML ─────────────────────────────────────────────────────
+ultralytics==8.0.228
+opencv-python==4.8.1.78
+torch==2.0.1
+torchvision==0.15.2
+
+# ── Data Processing ───────────────────────────────────────────────────────────
+numpy==1.24.3
+pillow==10.0.1
+PyYAML==6.0
+
+# ── Optional: better video codec support ──────────────────────────────────────
+# imageio[ffmpeg]
+
+# ── Optional: GPU / CUDA support (uncomment for Jetson / CUDA builds) ─────────
+# torch-cuda==11.8
+# onnxruntime-gpu==1.16.0
