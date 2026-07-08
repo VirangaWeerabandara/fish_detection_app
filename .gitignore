@@ -1,98 +1,103 @@
-# Byte-compiled / optimized / DLL files
-**__pycache__/
+__pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
-*.so
-
-# Distribution / packaging
+*.pyo
+*.pyd
 .Python
-build/
+*.egg
+*.egg-info/
 dist/
-downloads/
+build/
 eggs/
-.eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
 lib/
 lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
 
-# Virtual environments
-.venv/
+# ── Virtual Environments ──────────────────────────────────────────────────────
 venv/
+.venv/
 env/
 ENV/
-
-# Conda environments
-conda-meta/
 .env
+.conda/
 
-# Environment variables
-.env
-.env.*
-!.env.example
+# ── ML Models (large binary files — store separately) ─────────────────────────
+*.pt
+*.pth
+*.onnx
+*.engine       # TensorRT compiled model
+*.mlpackage/   # CoreML model
+*.mlmodel
+*.weights
+*.pb
+*.tflite
+export/        # default model export directory
 
-# Logs
+# ── YOLO / Ultralytics run outputs ────────────────────────────────────────────
+runs/
+ultralytics_runs/
+
+# ── Video & Image Data ────────────────────────────────────────────────────────
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.flv
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+*.gif
+data/
+datasets/
+videos/
+images/
+
+# ── Logs & Results ────────────────────────────────────────────────────────────
 *.log
+*.csv
+*.json
+logs/
+results/
 
-# Unit test / coverage reports
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-.cache/
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.AppleDouble
+.LSOverride
+Icon
+.DocumentRevisions-V100
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
 
-# Type checkers
-.mypy_cache/
-.pyre/
-.pytype/
-
-# Linting
-.ruff_cache/
-
-# Jupyter Notebook
-.ipynb_checkpoints/
-
-# IDEs
+# ── IDEs & Editors ────────────────────────────────────────────────────────────
 .vscode/
 .idea/
-
-# macOS
-.DS_Store
-
-# Windows
-Thumbs.db
-Desktop.ini
-
-# Python version management
-.python-version
-
-# PyInstaller
-*.manifest
-*.spec
-
-# SQLite databases
-*.sqlite3
-*.db
-
-# Temporary files
-*.tmp
-*.bak
 *.swp
+*.swo
+*~
+.project
+.pydevproject
+*.sublime-project
+*.sublime-workspace
 
-# Build artifacts
-pip-wheel-metadata/
+# ── Jupyter Notebooks ─────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
 
-# Coverage
-coverage.xml
-
-# Documentation
-docs/_build/
+# ── PyInstaller / cx_Freeze (if packaging) ────────────────────────────────────
+*.spec
+*.manifest
