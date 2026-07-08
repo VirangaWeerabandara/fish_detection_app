@@ -10,16 +10,16 @@
 # PyQt5==5.15.9 (installed via conda)
 
 # ── Computer Vision & ML ─────────────────────────────────────────────────────
-ultralytics>=8.4.9   # 8.1+ required for YOLOv11 (C3k2 block)
-opencv-python==4.8.1.78
-torch>=2.2.2           # 2.2+ required for macOS MPS stability + ultralytics 8.4
-torchvision>=0.17.2   # must match torch major.minor version
-lap>=0.5.12          # required by ByteTrack tracker (ultralytics dependency)
+ultralytics   # 8.1+ required for YOLOv11 (C3k2 block)
+opencv-python
+torch         # 2.2+ required for macOS MPS stability + ultralytics 8.4
+torchvision # must match torch major.minor version
+lap        # required by ByteTrack tracker (ultralytics dependency)
 
 # ── Data Processing ───────────────────────────────────────────────────────────
-numpy>=1.26.0          # 1.24.x causes bus errors with torch 2.2+ on macOS
-pillow==10.0.1
-PyYAML==6.0.1
+numpy        # 1.24.x causes bus errors with torch 2.2+ on macOS
+pillow
+PyYAML
 
 # ── Optional: better video codec support ──────────────────────────────────────
 # imageio[ffmpeg]
