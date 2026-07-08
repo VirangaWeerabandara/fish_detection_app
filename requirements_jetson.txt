@@ -1,0 +1,131 @@
+# =============================================================================
+# Fish Detection & Counting — NVIDIA Jetson Orin Nano Requirements
+# =============================================================================
+#
+# ⚠️  DO NOT run:  pip install -r requirements_jetson.txt  directly.
+#
+# Several packages CANNOT be installed from PyPI on ARM64/JetPack because
+# they require x86-64 pre-compiled binaries. Use the install steps below.
+#
+# RECOMMENDED: Run the automated setup script instead:
+#   chmod +x setup_jetson.sh && ./setup_jetson.sh
+#
+# =============================================================================
+# INSTALLATION ORDER (manual steps if not using setup_jetson.sh)
+# =============================================================================
+#
+# ── STEP 1: System packages via apt (do this first) ──────────────────────────
+#
+#   sudo apt-get update
+#   sudo apt-get install -y \
+#       python3-pyqt5 pyqt5-dev-tools \
+#       python3-opencv libopencv-dev \
+#       python3-pip python3-dev python3-venv \
+#       libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev
+#
+#   Reason: pip wheels for PyQt5 and opencv-python fail to compile on ARM64.
+#           The JetPack apt repo provides correct aarch64 binaries.
+#
+# ── STEP 2: Create venv (must inherit system packages) ───────────────────────
+#
+#   python3 -m venv ~/fish_venv --system-site-packages
+#   source ~/fish_venv/bin/activate
+#
+# ── STEP 3: PyTorch — NVIDIA aarch64 wheel (NOT from PyPI) ───────────────────
+#
+#   Do NOT run: pip install torch   ← this installs the x86-64 CPU-only build
+#
+#   Download the correct wheel for your JetPack version from:
+#   https://forums.developer.nvidia.com/t/pytorch-for-jetson/72048
+#
+#   JetPack 5.1.2 (CUDA 11.4), Python 3.8:
+#     pip install https://developer.download.nvidia.com/compute/redist/jp/v512/pytorch/torch-2.1.0a0+41361538.nv23.06-cp38-cp38-linux_aarch64.whl
+#
+#   JetPack 6.0 (CUDA 12.2), Python 3.10:
+#     pip install https://developer.download.nvidia.com/compute/redist/jp/v60/pytorch/torch-2.3.0a0+ebedce2-cp310-cp310-linux_aarch64.whl
+#
+#   Verify CUDA is working after install:
+#     python3 -c "import torch; print(torch.cuda.is_available())"  # must be True
+#
+# ── STEP 4: torchvision — build from source ───────────────────────────────────
+#
+#   No aarch64 wheel exists on PyPI. Build from source:
+#     git clone --branch v0.16.2 --depth 1 https://github.com/pytorch/vision.git
+#     cd vision && pip install -e . --no-build-isolation
+#
+#   Version map (match your torch version):
+#     torch 2.0.x → torchvision v0.15.2
+#     torch 2.1.x → torchvision v0.16.2
+#     torch 2.2.x → torchvision v0.17.2
+#     torch 2.3.x → torchvision v0.18.1
+#
+# ── STEP 5: ONNX tools (needed for TensorRT export) ──────────────────────────
+#
+#   pip install onnx onnxslim
+#
+#   onnxruntime-gpu is NOT on standard PyPI for aarch64.
+#   Install from NVIDIA's Jetson pip index (JetPack 6):
+#     pip install onnxruntime-gpu \
+#       --extra-index-url https://pypi.jetson-platform.nvidia.com/jp60/
+#   For JetPack 5:
+#     pip install onnxruntime-gpu \
+#       --extra-index-url https://pypi.jetson-platform.nvidia.com/jp512/
+#
+# ── STEP 6: pip install this file ─────────────────────────────────────────────
+#
+#   pip install -r requirements_jetson.txt
+#
+# ── STEP 7: Export model to TensorRT (on Jetson, once) ───────────────────────
+#
+#   python export_model.py --format engine --half
+#   export FISH_MODEL_PATH=../export/best.engine
+#
+# ── STEP 8: Max performance mode ─────────────────────────────────────────────
+#
+#   sudo nvpmodel -m 0     # MAXN power mode
+#   sudo jetson_clocks     # lock CPU/GPU clocks to max frequency
+#
+# =============================================================================
+
+# ── Python packages (pip install -r requirements_jetson.txt) ─────────────────
+
+# YOLO model runner + ByteTrack tracker
+ultralytics
+
+# NumPy MUST be <2 — PyTorch on Jetson is compiled against NumPy 1.x ABI.
+# NumPy 2.x causes a crash at torch import time.
+numpy<2
+
+pillow
+PyYAML
+
+# ByteTrack dependency (also required by ultralytics tracker)
+lap
+
+# OpenCV — headless variant ONLY.
+# Do NOT use opencv-python — it bundles its own Qt5 which crashes PyQt5.
+# opencv-python-headless has no bundled Qt, so there is no conflict.
+opencv-python-headless
+
+# ONNX tools — required by ultralytics for TensorRT export pipeline
+onnx
+onnxslim
+# onnxruntime-gpu → from NVIDIA Jetson pip index (see STEP 5 above)
+
+# ── NOT listed here (managed outside pip) ────────────────────────────────────
+# torch        → NVIDIA aarch64 wheel (see STEP 3 above)
+# torchvision  → build from source (see STEP 4 above)
+# PyQt5        → sudo apt install python3-pyqt5
+
+# ── TensorRT ─────────────────────────────────────────────────────────────────
+# TensorRT Python bindings are pre-installed by JetPack.
+# DO NOT pip install tensorrt — it installs the x86 version.
+# Verify with:
+#   python3 -c "import tensorrt; print(tensorrt.__version__)"
+
+# ── Optional: better video codec support ─────────────────────────────────────
+# imageio[ffmpeg]
+
+# ── Optional: Jetson system monitoring ───────────────────────────────────────
+# pip install jetson-stats
+# Then run: sudo jtop

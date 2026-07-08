@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Fish Detection & Counting
+Comment=YOLO + TensorRT fish detection and counting application
+Exec=bash -c "bash /home/venura/Desktop/Application/fish_detection_app/run.sh"
+Icon=utilities-terminal
+Terminal=true
+Categories=Science;Education;
+StartupNotify=true
