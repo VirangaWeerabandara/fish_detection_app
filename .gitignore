@@ -1,0 +1,103 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+
+# ── Virtual Environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+.env
+.conda/
+
+# ── ML Models (large binary files — store separately) ─────────────────────────
+*.pt
+*.pth
+*.onnx
+*.engine       # TensorRT compiled model
+*.mlpackage/   # CoreML model
+*.mlmodel
+*.weights
+*.pb
+*.tflite
+export/        # default model export directory
+
+# ── YOLO / Ultralytics run outputs ────────────────────────────────────────────
+runs/
+ultralytics_runs/
+
+# ── Video & Image Data ────────────────────────────────────────────────────────
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.flv
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+*.gif
+data/
+datasets/
+videos/
+images/
+
+# ── Logs & Results ────────────────────────────────────────────────────────────
+*.log
+*.csv
+*.json
+logs/
+results/
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.AppleDouble
+.LSOverride
+Icon
+.DocumentRevisions-V100
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# ── IDEs & Editors ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+*.sublime-project
+*.sublime-workspace
+
+# ── Jupyter Notebooks ─────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── PyInstaller / cx_Freeze (if packaging) ────────────────────────────────────
+*.spec
+*.manifest
