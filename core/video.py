@@ -137,3 +137,42 @@ def extract_frames(
             logger.warning(f"imageio failed: {e}")
 
     raise RuntimeError(f"Could not extract frames from {video_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Live camera
+# ─────────────────────────────────────────────────────────────────────────────
+def open_camera(device_index: int = 0) -> cv2.VideoCapture:
+    """
+    Open a USB (or built-in) camera and return a ready-to-read VideoCapture.
+
+    Parameters
+    ──────────
+    device_index : OpenCV camera index (0 = /dev/video0 on Linux/Jetson)
+
+    Returns
+    ───────
+    cv2.VideoCapture (opened and validated)
+
+    Raises
+    ──────
+    RuntimeError if the camera cannot be opened.
+    """
+    logger.info(f"Opening camera index {device_index}…")
+    cap = cv2.VideoCapture(device_index)
+    if not cap.isOpened():
+        raise RuntimeError(
+            f"Cannot open camera at index {device_index}. "
+            "Check that the USB camera is plugged in and not in use by another process."
+        )
+    # Reduce internal buffer to 1 frame so we always get the latest frame,
+    # not a stale one queued while inference was running.
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    logger.info(
+        f"Camera {device_index} opened — "
+        f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}×"
+        f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))} "
+        f"@ {cap.get(cv2.CAP_PROP_FPS):.1f} fps"
+    )
+    return cap
+

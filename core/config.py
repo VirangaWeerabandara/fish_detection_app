@@ -34,3 +34,11 @@ MAX_DIM    = 800    # downscale frames to this maximum dimension on ingest
 TRACKER_RESET_INTERVAL = 150  # reset ByteTrack state every N frames
 PREVIEW_INTERVAL       = 4    # generate a live-preview frame every N frames
 PREVIEW_MAX_DIM        = 480  # max dimension of the live-preview (pixels)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Live camera
+# ─────────────────────────────────────────────────────────────────────────────
+# USB camera device index — overridable via FISH_CAMERA_INDEX env variable.
+# On Jetson: /dev/video0 → index 0 (most USB cameras), or 1+ if CSI cam is present.
+CAMERA_INDEX   = int(_os.environ.get("FISH_CAMERA_INDEX", "0"))
+CAMERA_MAX_DIM = 640   # resize camera frames to this max-dim before inference

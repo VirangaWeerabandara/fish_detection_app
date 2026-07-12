@@ -8,11 +8,15 @@ No HTTP, no FastAPI, no requests — everything runs in-process.
 
 Communication pattern
 ─────────────────────
-• UploadWorker  (QThread) → calls core.video.extract_frames()
-                           → emits upload_finished(frame_count: int)
+• UploadWorker    (QThread) → calls core.video.extract_frames()
+                             → emits upload_finished(frame_count: int)
 • DetectionWorker (QThread) → calls core.detector directly
-                            → emits frame_ready(data: dict)  per frame
-                            → emits processing_done(result: dict) when done
+                             → emits frame_ready(data: dict)  per frame
+                             → emits processing_done(result: dict) when done
+• CameraWorker    (QThread) → opens USB camera via core.video.open_camera()
+                             → reads frames, runs YOLO+ByteTrack in a loop
+                             → emits camera_frame(data: dict)  per frame
+                             → emits camera_stopped(result: dict) on stop
 • show_frame()  → renders self.frames[idx] + self.detections[idx] in-memory
                   with cv2 drawing → QPixmap (zero HTTP, zero encoding)
 """
@@ -37,9 +41,9 @@ from PyQt5.QtCore import Qt, pyqtSignal, QThread
 from core.config import (
     TARGET_FPS, MAX_DIM,
     TRACKER_RESET_INTERVAL, PREVIEW_INTERVAL, PREVIEW_MAX_DIM,
-    DEVICE,
+    DEVICE, CAMERA_INDEX, CAMERA_MAX_DIM,
 )
-from core.video import extract_frames
+from core.video import extract_frames, open_camera
 from core.detector import FishDetector, draw_boxes_on_frame, make_preview_frame
 
 logger = logging.getLogger(__name__)
@@ -243,6 +247,150 @@ class DetectionWorker(QThread):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Camera Worker  — streams live USB camera frames through YOLO in a background thread
+# ─────────────────────────────────────────────────────────────────────────────
+class CameraWorker(QThread):
+    """
+    Continuously reads frames from a USB camera and runs YOLO+ByteTrack
+    inference on each frame.
+
+    Signals
+    ───────
+    camera_frame(dict)   — emitted per frame with annotated image + live stats
+    camera_stopped(dict) — emitted once when the stream is stopped or errors out
+    camera_error(str)    — emitted if the camera cannot be opened
+
+    The dict passed to camera_frame contains:
+        frame_number, fish_count, unique_fish_count,
+        image (annotated BGR numpy array)
+    """
+    camera_frame   = pyqtSignal(dict)
+    camera_stopped = pyqtSignal(dict)
+    camera_error   = pyqtSignal(str)
+
+    def __init__(self,
+                 device_index: int,
+                 detector: FishDetector,
+                 confidence: float,
+                 threshold: Optional[int] = None):
+        super().__init__()
+        self.device_index = device_index
+        self.detector     = detector
+        self.confidence   = confidence
+        self.threshold    = threshold
+        self._stop        = threading.Event()
+
+    def stop(self):
+        """Request the camera loop to exit after the current frame."""
+        self._stop.set()
+
+    def run(self):
+        if not self.detector.is_loaded:
+            self.camera_error.emit("Model not loaded — check MODEL_PATH in core/config.py")
+            return
+
+        # ── Open camera ───────────────────────────────────────────────────────
+        try:
+            cap = open_camera(self.device_index)
+        except RuntimeError as e:
+            self.camera_error.emit(str(e))
+            return
+
+        seen_ids:      set = set()
+        frame_number:  int = 0
+        tracker_epoch: int = 0
+        self.detector.reset_tracker()
+        logger.info(
+            f"CameraWorker started — device={self.device_index}, "
+            f"conf={self.confidence}, threshold={self.threshold}"
+        )
+
+        try:
+            while not self._stop.is_set():
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    logger.warning("Camera read failed — retrying…")
+                    continue
+
+                # ── Resize to cap GPU memory ──────────────────────────────────
+                h, w = frame.shape[:2]
+                if max(h, w) > CAMERA_MAX_DIM:
+                    scale = CAMERA_MAX_DIM / max(h, w)
+                    frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+
+                # ── Periodic ByteTrack reset ──────────────────────────────────
+                if frame_number > 0 and frame_number % TRACKER_RESET_INTERVAL == 0:
+                    self.detector.reset_tracker()
+                    tracker_epoch += 1
+                    logger.info(f"Camera: tracker reset #{tracker_epoch} at frame {frame_number}")
+
+                # ── YOLO inference ────────────────────────────────────────────
+                try:
+                    results = self.detector.track(frame, self.confidence)
+                except Exception as e:
+                    logger.warning(f"track() failed frame {frame_number}: {e} — falling back")
+                    try:
+                        results = self.detector.predict(frame, self.confidence)
+                    except Exception as e2:
+                        logger.error(f"predict() also failed frame {frame_number}: {e2} — skip")
+                        frame_number += 1
+                        continue
+
+                # ── Parse results ─────────────────────────────────────────────
+                boxes_obj     = results[0].boxes
+                fish_in_frame = len(boxes_obj) if boxes_obj else 0
+                track_ids: list = []
+
+                if boxes_obj is not None and boxes_obj.id is not None:
+                    for tid in boxes_obj.id.cpu().numpy().tolist():
+                        tid_int = int(tid)
+                        track_ids.append(tid_int)
+                        seen_ids.add(tid_int)
+
+                unique_so_far = len(seen_ids)
+                boxes_list = boxes_obj.xyxy.cpu().numpy().tolist() if fish_in_frame > 0 else []
+                confs_list  = boxes_obj.conf.cpu().numpy().tolist() if fish_in_frame > 0 else []
+
+                # ── Annotate frame ────────────────────────────────────────────
+                annotated = make_preview_frame(
+                    frame, boxes_list, confs_list, track_ids, CAMERA_MAX_DIM)
+
+                # ── Emit to UI ────────────────────────────────────────────────
+                self.camera_frame.emit({
+                    "frame_number":      frame_number,
+                    "fish_count":        fish_in_frame,
+                    "unique_fish_count": unique_so_far,
+                    "image":             annotated,
+                })
+
+                frame_number += 1
+
+                # ── Periodic GPU cache flush ──────────────────────────────────
+                if frame_number % 50 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                # ── Threshold check ───────────────────────────────────────────
+                if self.threshold is not None and unique_so_far >= self.threshold:
+                    logger.info(
+                        f"Camera: threshold {self.threshold} reached at frame {frame_number}")
+                    break
+
+        finally:
+            cap.release()
+            logger.info(
+                f"CameraWorker stopped — frames: {frame_number}, "
+                f"unique fish: {len(seen_ids)}"
+            )
+            self.camera_stopped.emit({
+                "total_frames":      frame_number,
+                "total_fish":        len(seen_ids),
+                "threshold_reached": (
+                    self.threshold is not None and len(seen_ids) >= self.threshold
+                ),
+            })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main Application Window
 # ─────────────────────────────────────────────────────────────────────────────
 class FishDetectionApp(QMainWindow):
@@ -270,6 +418,7 @@ class FishDetectionApp(QMainWindow):
         self.current_frame_idx: int            = 0
         self.upload_worker:     Optional[UploadWorker]    = None
         self.det_worker:        Optional[DetectionWorker] = None
+        self.cam_worker:        Optional[CameraWorker]    = None
 
         self._build_ui()
 
@@ -361,8 +510,39 @@ class FishDetectionApp(QMainWindow):
             "QPushButton:disabled { background-color:#CCCCCC; }")
         left.addWidget(self.stop_btn)
 
-        # 4. Results
-        left.addWidget(self._section_lbl("4. Results", section_font))
+        # 4. Live Camera
+        left.addWidget(self._section_lbl("4. Live Camera", section_font))
+
+        row_cam = QHBoxLayout()
+        row_cam.addWidget(QLabel("Camera Index:"))
+        self.camera_index_spin = QSpinBox()
+        self.camera_index_spin.setRange(0, 9)
+        self.camera_index_spin.setValue(CAMERA_INDEX)
+        self.camera_index_spin.setToolTip(
+            "OpenCV camera index (0 = /dev/video0). "
+            "Increase if the USB camera is not index 0 on your Jetson.")
+        row_cam.addWidget(self.camera_index_spin)
+        left.addLayout(row_cam)
+
+        self.start_camera_btn = QPushButton("🎥 Start Camera")
+        self.start_camera_btn.clicked.connect(self.start_camera)
+        self.start_camera_btn.setStyleSheet(
+            "QPushButton { background-color:#00897B; color:white; padding:10px;"
+            " border-radius:5px; font-weight:bold; }"
+            "QPushButton:disabled { background-color:#CCCCCC; }")
+        left.addWidget(self.start_camera_btn)
+
+        self.stop_camera_btn = QPushButton("⏹ Stop Camera")
+        self.stop_camera_btn.clicked.connect(self.stop_camera)
+        self.stop_camera_btn.setEnabled(False)
+        self.stop_camera_btn.setStyleSheet(
+            "QPushButton { background-color:#e53935; color:white; padding:10px;"
+            " border-radius:5px; font-weight:bold; }"
+            "QPushButton:disabled { background-color:#CCCCCC; }")
+        left.addWidget(self.stop_camera_btn)
+
+        # 5. Results
+        left.addWidget(self._section_lbl("5. Results", section_font))
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         self.status_text.setMaximumHeight(200)
@@ -466,6 +646,17 @@ class FishDetectionApp(QMainWindow):
         self.process_threshold_btn.setEnabled(enabled)
         self.process_all_btn.setEnabled(enabled)
         self.stop_btn.setEnabled(not enabled)
+        # Disable camera start while video is processing (and vice-versa)
+        self.start_camera_btn.setEnabled(enabled)
+
+    def _set_camera_btns(self, running: bool):
+        """Flip camera start/stop buttons and lock out video processing."""
+        self.start_camera_btn.setEnabled(not running)
+        self.stop_camera_btn.setEnabled(running)
+        # Lock video controls while camera is streaming
+        self.upload_btn.setEnabled(not running)
+        self.process_threshold_btn.setEnabled(not running)
+        self.process_all_btn.setEnabled(not running)
 
     def _show_live_ui(self):
         self.live_label.setVisible(True)
@@ -681,6 +872,98 @@ class FishDetectionApp(QMainWindow):
         self.show_frame(idx)
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Live Camera flow
+    # ─────────────────────────────────────────────────────────────────────────
+    def start_camera(self):
+        """Open the USB camera and start the CameraWorker stream."""
+        if not self.detector.is_loaded:
+            QMessageBox.warning(self, "Model Not Loaded",
+                                "The YOLO model is not loaded. Check MODEL_PATH in core/config.py.")
+            return
+
+        device_idx = self.camera_index_spin.value()
+        conf       = self.confidence_spin.value() / 100.0
+        thr        = self.threshold_spin.value() if self.threshold_spin.value() > 0 else None
+
+        self._set_camera_btns(True)
+        self._show_live_ui()
+        self.live_label.setText("🔴 LIVE  CAM")
+        self.det_progress.setVisible(False)   # no progress bar for camera (infinite stream)
+        self.statusBar().showMessage(
+            f"📷 Camera {device_idx} streaming — conf: {conf:.2f}"
+            + (f", threshold: {thr}" if thr else "")
+        )
+        self.log(
+            f"🎥 Camera started\n"
+            f"   Device : {device_idx}\n"
+            f"   Conf   : {conf:.2f}\n"
+            f"   Threshold: {thr if thr else 'none'}"
+        )
+
+        self.cam_worker = CameraWorker(
+            device_index=device_idx,
+            detector=self.detector,
+            confidence=conf,
+            threshold=thr,
+        )
+        self.cam_worker.camera_frame.connect(self.on_camera_frame)
+        self.cam_worker.camera_stopped.connect(self.on_camera_stopped)
+        self.cam_worker.camera_error.connect(self.on_camera_error)
+        self.cam_worker.start()
+
+    def stop_camera(self):
+        """Signal the CameraWorker to stop after the current frame."""
+        if self.cam_worker:
+            self.cam_worker.stop()
+        self.stop_camera_btn.setEnabled(False)
+        self.statusBar().showMessage("Stopping camera…")
+
+    def on_camera_frame(self, data: dict):
+        """Called for every live camera frame — update display and counters."""
+        try:
+            frame_num  = data.get("frame_number", 0)
+            fish_now   = data.get("fish_count", 0)
+            unique     = data.get("unique_fish_count", 0)
+            preview: Optional[np.ndarray] = data.get("image")
+
+            if preview is not None:
+                self._display_pixmap(_bgr_to_pixmap(preview))
+
+            self.frame_info_lbl.setText(
+                f"📷 Frame {frame_num}  │  "
+                f"Visible: {fish_now}  │  🐟 Unique: {unique}")
+        except Exception:
+            pass
+
+    def on_camera_stopped(self, result: dict):
+        """Called once when CameraWorker exits (stop requested or threshold hit)."""
+        self.live_label.setVisible(False)
+        self._set_camera_btns(False)
+        # Re-enable process buttons only if a video has been loaded
+        if self.frames:
+            self._set_process_btns(True)
+
+        frames_done = result.get("total_frames", 0)
+        unique      = result.get("total_fish", 0)
+        hit         = result.get("threshold_reached", False)
+
+        msg  = f"📷 Camera stopped\n"
+        msg += f"   Frames streamed : {frames_done}\n"
+        msg += f"   🐟 Unique fish  : {unique}\n"
+        if hit:
+            msg += f"   ✅ Threshold reached!"
+        self.log(msg)
+        self.statusBar().showMessage(
+            f"📷 Camera stopped — {unique} unique fish counted over {frames_done} frames")
+
+    def on_camera_error(self, err: str):
+        """Called when the camera fails to open or encounters a fatal error."""
+        self.live_label.setVisible(False)
+        self._set_camera_btns(False)
+        QMessageBox.critical(self, "Camera Error", err)
+        self.statusBar().showMessage("❌ Camera error")
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Clear
     # ─────────────────────────────────────────────────────────────────────────
     def clear_all(self):
@@ -689,6 +972,8 @@ class FishDetectionApp(QMainWindow):
             return
         if self.det_worker and self.det_worker.isRunning():
             self.det_worker.stop()
+        if self.cam_worker and self.cam_worker.isRunning():
+            self.cam_worker.stop()
         self.video_path        = None
         self.frames            = []
         self.detections        = []
@@ -699,6 +984,7 @@ class FishDetectionApp(QMainWindow):
         self.frame_info_lbl.setText("No frame loaded")
         self.status_text.clear()
         self._set_process_btns(False)
+        self._set_camera_btns(False)
         self.prev_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
         self.jump_spin.setValue(1)
