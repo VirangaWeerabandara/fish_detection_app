@@ -45,6 +45,7 @@ from core.config import (
 )
 from core.video import extract_frames, open_camera
 from core.detector import FishDetector, draw_boxes_on_frame, make_preview_frame
+from core.gpio_controller import GPIOController
 
 logger = logging.getLogger(__name__)
 
@@ -403,9 +404,10 @@ class FishDetectionApp(QMainWindow):
       self.detections  — list of per-frame detection dicts (set after processing)
     """
 
-    def __init__(self, detector: FishDetector):
+    def __init__(self, detector: FishDetector, gpio: Optional["GPIOController"] = None):
         super().__init__()
         self.detector = detector
+        self.gpio     = gpio  # may be None if caller does not supply one
 
         self.setWindowTitle("🐟 Fish Detection & Counting System")
         self.setGeometry(100, 100, 1920, 1080)
@@ -421,6 +423,10 @@ class FishDetectionApp(QMainWindow):
         self.cam_worker:        Optional[CameraWorker]    = None
 
         self._build_ui()
+
+        # Signal "ready" on the relay board once the window is fully built
+        if self.gpio and detector.is_loaded:
+            self.gpio.set_ready()
 
     # ─────────────────────────────────────────────────────────────────────────
     # UI construction
@@ -722,6 +728,10 @@ class FishDetectionApp(QMainWindow):
         self._set_process_btns(False)
         self._show_live_ui()
 
+        # Relay: light up IN2 (pin 13) and IN3 (pin 15) — detection running
+        if self.gpio:
+            self.gpio.set_detecting(True)
+
         self.det_worker = DetectionWorker(
             self.frames, self.detector, confidence, threshold)
         self.det_worker.frame_ready.connect(self.on_frame_update)
@@ -749,6 +759,9 @@ class FishDetectionApp(QMainWindow):
     def stop_processing(self):
         if self.det_worker:
             self.det_worker.stop()
+        # Relay: user cancelled — turn off detection indicators
+        if self.gpio:
+            self.gpio.set_detecting(False)
         self._set_process_btns(True)
         self.live_label.setVisible(False)
         self.det_progress.setVisible(False)
@@ -786,6 +799,10 @@ class FishDetectionApp(QMainWindow):
         self.det_progress.setVisible(False)
         self._set_process_btns(True)
 
+        # Relay: turn off detection indicators, light up IN4 (pin 16) — complete
+        if self.gpio:
+            self.gpio.set_complete()
+
         # Grab detections from the finished worker
         self.detections        = self.det_worker.detections
         self.current_frame_idx = 0
@@ -821,6 +838,9 @@ class FishDetectionApp(QMainWindow):
         self._set_process_btns(True)
         self.live_label.setVisible(False)
         self.det_progress.setVisible(False)
+        # Relay: error — turn off detection indicators
+        if self.gpio:
+            self.gpio.set_detecting(False)
         QMessageBox.critical(self, "Detection Error", err)
         self.statusBar().showMessage("❌ Error during detection")
 
@@ -888,6 +908,10 @@ class FishDetectionApp(QMainWindow):
         self._set_camera_btns(True)
         self._show_live_ui()
         self.live_label.setText("🔴 LIVE  CAM")
+
+        # Relay: light up IN2 (pin 13) and IN3 (pin 15) — camera stream running
+        if self.gpio:
+            self.gpio.set_detecting(True)
         self.det_progress.setVisible(False)   # no progress bar for camera (infinite stream)
         self.statusBar().showMessage(
             f"📷 Camera {device_idx} streaming — conf: {conf:.2f}"
@@ -915,6 +939,9 @@ class FishDetectionApp(QMainWindow):
         """Signal the CameraWorker to stop after the current frame."""
         if self.cam_worker:
             self.cam_worker.stop()
+        # Relay: user manually stopped camera — turn off detection indicators
+        if self.gpio:
+            self.gpio.set_detecting(False)
         self.stop_camera_btn.setEnabled(False)
         self.statusBar().showMessage("Stopping camera…")
 
@@ -947,6 +974,13 @@ class FishDetectionApp(QMainWindow):
         unique      = result.get("total_fish", 0)
         hit         = result.get("threshold_reached", False)
 
+        # Relay: if threshold was reached → complete indicator; else just off
+        if self.gpio:
+            if hit:
+                self.gpio.set_complete()
+            else:
+                self.gpio.set_detecting(False)
+
         msg  = f"📷 Camera stopped\n"
         msg += f"   Frames streamed : {frames_done}\n"
         msg += f"   🐟 Unique fish  : {unique}\n"
@@ -960,6 +994,9 @@ class FishDetectionApp(QMainWindow):
         """Called when the camera fails to open or encounters a fatal error."""
         self.live_label.setVisible(False)
         self._set_camera_btns(False)
+        # Relay: camera error — turn off detection indicators
+        if self.gpio:
+            self.gpio.set_detecting(False)
         QMessageBox.critical(self, "Camera Error", err)
         self.statusBar().showMessage("❌ Camera error")
 
@@ -992,3 +1029,20 @@ class FishDetectionApp(QMainWindow):
         self.jump_spin.setEnabled(False)
         self.jump_btn.setEnabled(False)
         self.statusBar().showMessage("Cleared")
+
+        # Relay: reset all → return to READY state
+        if self.gpio:
+            self.gpio.reset_all()
+            if self.detector.is_loaded:
+                self.gpio.set_ready()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Window close
+    # ─────────────────────────────────────────────────────────────────────────
+    def closeEvent(self, event):
+        """Ensure GPIO pins are left in a clean state when the window is closed."""
+        # Note: main.py also calls gpio.cleanup() after exec_() returns,
+        # but this double-call is safe — cleanup() is idempotent.
+        if self.gpio:
+            self.gpio.reset_all()
+        super().closeEvent(event)

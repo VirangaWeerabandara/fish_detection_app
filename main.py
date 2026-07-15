@@ -60,21 +60,30 @@ def main() -> int:
 
     print()
 
-    # ── 2. Create Qt application and open the main window ─────────────────────
+    # ── 2. Initialise GPIO relay controller ───────────────────────────────────
+    from core.gpio_controller import GPIOController
+    gpio = GPIOController()
+
+    # ── 3. Create Qt application and open the main window ─────────────────────
     from PyQt5.QtWidgets import QApplication
     from ui.app import FishDetectionApp
 
     qt_app = QApplication(sys.argv)
     qt_app.setApplicationName("Fish Detection & Counting")
 
-    window = FishDetectionApp(detector=detector)
+    window = FishDetectionApp(detector=detector, gpio=gpio)
     window.show()
 
-    # ── 3. Run the Qt event loop (blocks until window closes) ─────────────────
+    # ── 4. Run the Qt event loop (blocks until window closes) ─────────────────
     exit_code = qt_app.exec_()
+
+    # ── 5. Release GPIO resources before exit ─────────────────────────────────
+    gpio.cleanup()
+
     print("\n⏹️  Window closed — exiting.")
     return exit_code
 
 
 if __name__ == "__main__":
     sys.exit(main())
+
