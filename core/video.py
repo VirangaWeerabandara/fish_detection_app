@@ -138,10 +138,37 @@ def extract_frames(
 
     raise RuntimeError(f"Could not extract frames from {video_path}")
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Live camera
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _gstreamer_available() -> bool:
+    """Return True if this OpenCV build was compiled with GStreamer support."""
+    build_info = cv2.getBuildInformation()
+    for line in build_info.splitlines():
+        if "GStreamer" in line:
+            # Line looks like:  "    GStreamer:                    YES (1.x.y)"
+            return "YES" in line
+    return False
+
+
+def _try_open(source, backend=None, label: str = "") -> "cv2.VideoCapture | None":
+    """
+    Attempt to open a VideoCapture.  Returns the cap on success, None on failure.
+    Never raises.
+    """
+    try:
+        cap = cv2.VideoCapture(source, backend) if backend is not None \
+              else cv2.VideoCapture(source)
+        if cap.isOpened():
+            logger.info(f"Camera opened via {label or source}")
+            return cap
+        cap.release()
+    except Exception as exc:
+        logger.debug(f"_try_open({label}) raised: {exc}")
+    return None
+
+
 def open_camera(source: "int | str" = 0) -> cv2.VideoCapture:
     """
     Open a camera and return a ready-to-read VideoCapture.
@@ -149,42 +176,108 @@ def open_camera(source: "int | str" = 0) -> cv2.VideoCapture:
     Parameters
     ──────────
     source : int  → USB/V4L2 device index (e.g. 0 = /dev/video0)
-             str  → GStreamer pipeline string for the Jetson CSI connector
-                    (e.g. the value of config.CAMERA_CSI_PIPELINE)
+             str  → Primary GStreamer pipeline string (e.g. CAMERA_CSI_PIPELINE)
+                    If it fails, fallback pipelines are tried automatically.
 
-    Returns
-    ───────
-    cv2.VideoCapture (opened and validated)
+    Fallback order for CSI (str source)
+    ────────────────────────────────────
+      1. Primary pipeline as-is          (nvarguscamerasrc)
+      2. v4l2src GStreamer pipeline       (/dev/video0 via GStreamer)
+      3. Plain device index 0             (direct V4L2, no GStreamer)
 
     Raises
     ──────
-    RuntimeError if the camera cannot be opened.
+    RuntimeError with a diagnostic message if every attempt fails.
     """
-    if isinstance(source, str):
-        logger.info(f"Opening CSI camera via GStreamer pipeline…")
-        cap = cv2.VideoCapture(source, cv2.CAP_GSTREAMER)
-        source_label = "CSI pipeline"
-    else:
-        logger.info(f"Opening USB camera index {source}…")
-        cap = cv2.VideoCapture(source)
-        source_label = f"index {source}"
+    gst_ok = _gstreamer_available()
 
-    if not cap.isOpened():
+    # ── CSI / GStreamer path ───────────────────────────────────────────────────
+    if isinstance(source, str):
+        logger.info("Opening CSI camera…")
+
+        if not gst_ok:
+            logger.error(
+                "OpenCV was NOT built with GStreamer support. "
+                "The pip-installed opencv-python does not include GStreamer. "
+                "On Jetson, use the system OpenCV that ships with JetPack:\n"
+                "  pip uninstall opencv-python opencv-python-headless -y\n"
+                "  # The system cv2 at /usr/lib/python3/dist-packages is already correct."
+            )
+            # Still attempt the fallback below; on some setups the device index works.
+
+        else:
+            # Attempt 1 — primary pipeline (nvarguscamerasrc)
+            logger.info(f"Attempt 1 — nvarguscamerasrc pipeline")
+            cap = _try_open(source, cv2.CAP_GSTREAMER, "nvarguscamerasrc pipeline")
+            if cap:
+                _configure_cap(cap, "CSI/nvarguscamerasrc")
+                return cap
+
+            logger.warning(
+                "nvarguscamerasrc pipeline failed. Possible causes:\n"
+                "  • nvargus-daemon is not running  →  sudo systemctl start nvargus-daemon\n"
+                "  • Another process holds the camera sensor (kill it and retry)\n"
+                "  • Wrong sensor-id or resolution in config.py\n"
+                "  • Camera ribbon cable not seated properly\n"
+                "Trying v4l2src fallback…"
+            )
+
+            # Attempt 2 — v4l2src GStreamer pipeline (CSI exposed as /dev/video0)
+            v4l2_pipeline = (
+                "v4l2src device=/dev/video0 ! "
+                "video/x-raw, format=UYVY ! "
+                "videoconvert ! video/x-raw, format=BGR ! appsink"
+            )
+            logger.info(f"Attempt 2 — v4l2src pipeline: {v4l2_pipeline}")
+            cap = _try_open(v4l2_pipeline, cv2.CAP_GSTREAMER, "v4l2src pipeline")
+            if cap:
+                _configure_cap(cap, "CSI/v4l2src")
+                return cap
+            logger.warning("v4l2src GStreamer pipeline also failed. Trying direct index 0…")
+
+        # Attempt 3 — plain device index (last resort)
+        logger.info("Attempt 3 — plain cv2.VideoCapture(0)")
+        cap = _try_open(0, label="device index 0")
+        if cap:
+            _configure_cap(cap, "device index 0 (fallback)")
+            return cap
+
         raise RuntimeError(
-            f"Cannot open camera ({source_label}). "
-            "For CSI: confirm nvarguscamerasrc is available and no other process holds the sensor. "
-            "For USB: check the camera is plugged in and not in use."
+            "Cannot open the CSI camera. All attempts failed.\n\n"
+            "Checklist:\n"
+            "  1. Is nvargus-daemon running?\n"
+            "     → sudo systemctl status nvargus-daemon\n"
+            "     → sudo systemctl start  nvargus-daemon\n"
+            "  2. Is the camera detected?\n"
+            "     → ls /dev/video*\n"
+            "     → gst-launch-1.0 nvarguscamerasrc num-buffers=1 ! fakesink\n"
+            "  3. Is OpenCV GStreamer-enabled?\n"
+            "     → python3 -c \"import cv2; print(cv2.getBuildInformation())\" | grep GStreamer\n"
+            "     → If NO, uninstall pip opencv and use the JetPack system cv2.\n"
+            "  4. Is the ribbon cable properly seated on both ends?\n"
+            f"  GStreamer available in this OpenCV build: {gst_ok}"
         )
 
-    # Reduce internal buffer to 1 frame so we always get the latest frame,
-    # not a stale one queued while inference was running.
+    # ── USB / device-index path ────────────────────────────────────────────────
+    logger.info(f"Opening USB camera index {source}…")
+    cap = _try_open(source, label=f"USB index {source}")
+    if cap:
+        _configure_cap(cap, f"USB index {source}")
+        return cap
+
+    raise RuntimeError(
+        f"Cannot open USB camera at index {source}. "
+        "Check it is plugged in and not in use by another process."
+    )
+
+
+def _configure_cap(cap: cv2.VideoCapture, label: str):
+    """Apply common post-open settings and log the resolved resolution."""
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     logger.info(
-        f"Camera ({source_label}) opened — "
+        f"Camera ready ({label}) — "
         f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}×"
         f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))} "
         f"@ {cap.get(cv2.CAP_PROP_FPS):.1f} fps"
     )
-    return cap
-
 

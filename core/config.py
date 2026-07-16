@@ -47,17 +47,16 @@ CAMERA_USE_CSI = bool(int(_os.environ.get("FISH_CAMERA_USE_CSI", "1")))
 # Adjust width/height/framerate to match your sensor (e.g. IMX219: 1920x1080@30).
 CAMERA_CSI_WIDTH     = int(_os.environ.get("FISH_CAMERA_CSI_WIDTH",  "1920"))
 CAMERA_CSI_HEIGHT    = int(_os.environ.get("FISH_CAMERA_CSI_HEIGHT", "1080"))
-CAMERA_CSI_FPS       = int(_os.environ.get("FISH_CAMERA_CSI_FPS",    "30"))
+CAMERA_CSI_FPS       = int(_os.environ.get("FISH_CAMERA_CSI_FPS",    "60"))   # IMX477 confirmed @ 60fps
 CAMERA_CSI_SENSOR_ID = int(_os.environ.get("FISH_CAMERA_CSI_SENSOR", "0"))
 
 def _build_csi_pipeline(width: int, height: int, fps: int, sensor_id: int) -> str:
     """Return the GStreamer pipeline string for the Jetson CSI camera."""
     return (
         f"nvarguscamerasrc sensor-id={sensor_id} ! "
-        f"video/x-raw(memory:NVMM), width={width}, height={height}, "
-        f"framerate={fps}/1 ! "
-        f"nvvidconv ! video/x-raw, format=BGRx ! "
-        f"videoconvert ! video/x-raw, format=BGR ! appsink"
+        f"video/x-raw(memory:NVMM),width={width},height={height},framerate={fps}/1 ! "
+        f"nvvidconv ! video/x-raw,format=BGRx ! "
+        f"videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
     )
 
 CAMERA_CSI_PIPELINE = _build_csi_pipeline(
