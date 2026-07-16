@@ -13,7 +13,8 @@ Communication pattern
 • DetectionWorker (QThread) → calls core.detector directly
                              → emits frame_ready(data: dict)  per frame
                              → emits processing_done(result: dict) when done
-• CameraWorker    (QThread) → opens USB camera via core.video.open_camera()
+• CameraWorker    (QThread) → opens CSI camera (nvarguscamerasrc GStreamer pipeline)
+                             or USB camera via core.video.open_camera()
                              → reads frames, runs YOLO+ByteTrack in a loop
                              → emits camera_frame(data: dict)  per frame
                              → emits camera_stopped(result: dict) on stop
@@ -42,6 +43,7 @@ from core.config import (
     TARGET_FPS, MAX_DIM,
     TRACKER_RESET_INTERVAL, PREVIEW_INTERVAL, PREVIEW_MAX_DIM,
     DEVICE, CAMERA_INDEX, CAMERA_MAX_DIM,
+    CAMERA_USE_CSI, CAMERA_CSI_PIPELINE,
 )
 from core.video import extract_frames, open_camera
 from core.detector import FishDetector, draw_boxes_on_frame, make_preview_frame
@@ -270,16 +272,16 @@ class CameraWorker(QThread):
     camera_error   = pyqtSignal(str)
 
     def __init__(self,
-                 device_index: int,
+                 source,           # int (USB device index) or str (GStreamer pipeline)
                  detector: FishDetector,
                  confidence: float,
                  threshold: Optional[int] = None):
         super().__init__()
-        self.device_index = device_index
-        self.detector     = detector
-        self.confidence   = confidence
-        self.threshold    = threshold
-        self._stop        = threading.Event()
+        self.source    = source
+        self.detector  = detector
+        self.confidence = confidence
+        self.threshold  = threshold
+        self._stop      = threading.Event()
 
     def stop(self):
         """Request the camera loop to exit after the current frame."""
@@ -292,17 +294,18 @@ class CameraWorker(QThread):
 
         # ── Open camera ───────────────────────────────────────────────────────
         try:
-            cap = open_camera(self.device_index)
+            cap = open_camera(self.source)
         except RuntimeError as e:
             self.camera_error.emit(str(e))
             return
 
+        source_label = self.source if isinstance(self.source, str) else f"USB:{self.source}"
         seen_ids:      set = set()
         frame_number:  int = 0
         tracker_epoch: int = 0
         self.detector.reset_tracker()
         logger.info(
-            f"CameraWorker started — device={self.device_index}, "
+            f"CameraWorker started — source={source_label}, "
             f"conf={self.confidence}, threshold={self.threshold}"
         )
 
@@ -424,9 +427,11 @@ class FishDetectionApp(QMainWindow):
 
         self._build_ui()
 
-        # Signal "ready" on the relay board once the window is fully built
-        if self.gpio and detector.is_loaded:
-            self.gpio.set_ready()
+        # Reset all indicators first, then light up pin 16 (READY) if model loaded
+        if self.gpio:
+            self.gpio.reset_all()
+            if detector.is_loaded:
+                self.gpio.set_ready()
 
     # ─────────────────────────────────────────────────────────────────────────
     # UI construction
@@ -895,37 +900,44 @@ class FishDetectionApp(QMainWindow):
     # Live Camera flow
     # ─────────────────────────────────────────────────────────────────────────
     def start_camera(self):
-        """Open the USB camera and start the CameraWorker stream."""
+        """Open the CSI (or USB fallback) camera and start the CameraWorker stream."""
         if not self.detector.is_loaded:
             QMessageBox.warning(self, "Model Not Loaded",
                                 "The YOLO model is not loaded. Check MODEL_PATH in core/config.py.")
             return
 
-        device_idx = self.camera_index_spin.value()
-        conf       = self.confidence_spin.value() / 100.0
-        thr        = self.threshold_spin.value() if self.threshold_spin.value() > 0 else None
+        conf = self.confidence_spin.value() / 100.0
+        thr  = self.threshold_spin.value() if self.threshold_spin.value() > 0 else None
+
+        # Choose source: CSI GStreamer pipeline or USB index
+        if CAMERA_USE_CSI:
+            source = CAMERA_CSI_PIPELINE
+            source_label = "CSI"
+        else:
+            source = self.camera_index_spin.value()
+            source_label = f"USB:{source}"
 
         self._set_camera_btns(True)
         self._show_live_ui()
         self.live_label.setText("🔴 LIVE  CAM")
 
-        # Relay: light up IN2 (pin 13) and IN3 (pin 15) — camera stream running
+        # Relay: light up pins 15 and 13 — camera stream running
         if self.gpio:
             self.gpio.set_detecting(True)
         self.det_progress.setVisible(False)   # no progress bar for camera (infinite stream)
         self.statusBar().showMessage(
-            f"📷 Camera {device_idx} streaming — conf: {conf:.2f}"
+            f"📷 Camera ({source_label}) streaming — conf: {conf:.2f}"
             + (f", threshold: {thr}" if thr else "")
         )
         self.log(
             f"🎥 Camera started\n"
-            f"   Device : {device_idx}\n"
+            f"   Source : {source_label}\n"
             f"   Conf   : {conf:.2f}\n"
             f"   Threshold: {thr if thr else 'none'}"
         )
 
         self.cam_worker = CameraWorker(
-            device_index=device_idx,
+            source=source,
             detector=self.detector,
             confidence=conf,
             threshold=thr,
@@ -1030,11 +1042,9 @@ class FishDetectionApp(QMainWindow):
         self.jump_btn.setEnabled(False)
         self.statusBar().showMessage("Cleared")
 
-        # Relay: reset all → return to READY state
+        # Relay: reset all indicators to OFF
         if self.gpio:
             self.gpio.reset_all()
-            if self.detector.is_loaded:
-                self.gpio.set_ready()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Window close

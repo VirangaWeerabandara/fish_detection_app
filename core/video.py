@@ -142,13 +142,15 @@ def extract_frames(
 # ─────────────────────────────────────────────────────────────────────────────
 # Live camera
 # ─────────────────────────────────────────────────────────────────────────────
-def open_camera(device_index: int = 0) -> cv2.VideoCapture:
+def open_camera(source: "int | str" = 0) -> cv2.VideoCapture:
     """
-    Open a USB (or built-in) camera and return a ready-to-read VideoCapture.
+    Open a camera and return a ready-to-read VideoCapture.
 
     Parameters
     ──────────
-    device_index : OpenCV camera index (0 = /dev/video0 on Linux/Jetson)
+    source : int  → USB/V4L2 device index (e.g. 0 = /dev/video0)
+             str  → GStreamer pipeline string for the Jetson CSI connector
+                    (e.g. the value of config.CAMERA_CSI_PIPELINE)
 
     Returns
     ───────
@@ -158,21 +160,31 @@ def open_camera(device_index: int = 0) -> cv2.VideoCapture:
     ──────
     RuntimeError if the camera cannot be opened.
     """
-    logger.info(f"Opening camera index {device_index}…")
-    cap = cv2.VideoCapture(device_index)
+    if isinstance(source, str):
+        logger.info(f"Opening CSI camera via GStreamer pipeline…")
+        cap = cv2.VideoCapture(source, cv2.CAP_GSTREAMER)
+        source_label = "CSI pipeline"
+    else:
+        logger.info(f"Opening USB camera index {source}…")
+        cap = cv2.VideoCapture(source)
+        source_label = f"index {source}"
+
     if not cap.isOpened():
         raise RuntimeError(
-            f"Cannot open camera at index {device_index}. "
-            "Check that the USB camera is plugged in and not in use by another process."
+            f"Cannot open camera ({source_label}). "
+            "For CSI: confirm nvarguscamerasrc is available and no other process holds the sensor. "
+            "For USB: check the camera is plugged in and not in use."
         )
+
     # Reduce internal buffer to 1 frame so we always get the latest frame,
     # not a stale one queued while inference was running.
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     logger.info(
-        f"Camera {device_index} opened — "
+        f"Camera ({source_label}) opened — "
         f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}×"
         f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))} "
         f"@ {cap.get(cv2.CAP_PROP_FPS):.1f} fps"
     )
     return cap
+
 

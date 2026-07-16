@@ -6,10 +6,10 @@ Thin wrapper around Jetson.GPIO for controlling a 4-channel relay board
 
 Pin mapping (BOARD numbering)
 ─────────────────────────────
-  IN1 → Pin 11  — Application ready / model loaded
-  IN2 → Pin 13  — Detection / camera stream active
-  IN3 → Pin 15  — Detection / camera stream active (paired with IN2)
-  IN4 → Pin 16  — Counting complete
+  IN1 → Pin 16  — Application ready / model loaded
+  IN2 → Pin 15  — Detection / camera stream active
+  IN3 → Pin 13  — Detection / camera stream active (paired with IN2)
+  IN4 → Pin 11  — Counting complete
 
 Relay polarity
 ──────────────
@@ -139,7 +139,7 @@ class GPIOController:
     def set_ready(self):
         """
         Application is ready for inference (model loaded).
-        Lights up IN1 (pin 11). Ensures detect and complete indicators are off.
+        Lights up IN1 (pin 16). Ensures detect and complete indicators are off.
         """
         self._off(GPIO_PIN_DETECT_A)
         self._off(GPIO_PIN_DETECT_B)
@@ -151,7 +151,7 @@ class GPIOController:
         """
         Signal that detection / camera stream has started or stopped.
 
-        active=True  → lights up IN2 (pin 13) and IN3 (pin 15)
+        active=True  → lights up IN2 (pin 15) and IN3 (pin 13)
         active=False → turns off IN2 and IN3; leaves READY and COMPLETE untouched
         """
         if active:
@@ -166,9 +166,10 @@ class GPIOController:
     def set_complete(self):
         """
         Counting is complete.
-        Turns off detection indicators (IN2, IN3) and lights up IN4 (pin 16).
-        IN1 (READY) remains on.
+        Turns off ALL other indicators and lights up only IN4 (pin 11).
+        State machine: pin 16 (start) → pins 15+13 (detecting) → pin 11 (done).
         """
+        self._off(GPIO_PIN_READY)
         self._off(GPIO_PIN_DETECT_A)
         self._off(GPIO_PIN_DETECT_B)
         self._on(GPIO_PIN_COMPLETE)

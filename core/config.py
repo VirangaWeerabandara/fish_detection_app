@@ -38,8 +38,34 @@ PREVIEW_MAX_DIM        = 480  # max dimension of the live-preview (pixels)
 # ─────────────────────────────────────────────────────────────────────────────
 # Live camera
 # ─────────────────────────────────────────────────────────────────────────────
-# USB camera device index — overridable via FISH_CAMERA_INDEX env variable.
-# On Jetson: /dev/video0 → index 0 (most USB cameras), or 1+ if CSI cam is present.
+# CSI camera (Jetson camera connector, e.g. IMX219 / IMX477)
+# Set FISH_CAMERA_USE_CSI=0 to fall back to USB.
+CAMERA_USE_CSI = bool(int(_os.environ.get("FISH_CAMERA_USE_CSI", "1")))
+
+# GStreamer pipeline for nvarguscamerasrc (CSI).
+# sensor-id=0 targets the first CSI port on the Jetson Orin Nano.
+# Adjust width/height/framerate to match your sensor (e.g. IMX219: 1920x1080@30).
+CAMERA_CSI_WIDTH     = int(_os.environ.get("FISH_CAMERA_CSI_WIDTH",  "1920"))
+CAMERA_CSI_HEIGHT    = int(_os.environ.get("FISH_CAMERA_CSI_HEIGHT", "1080"))
+CAMERA_CSI_FPS       = int(_os.environ.get("FISH_CAMERA_CSI_FPS",    "30"))
+CAMERA_CSI_SENSOR_ID = int(_os.environ.get("FISH_CAMERA_CSI_SENSOR", "0"))
+
+def _build_csi_pipeline(width: int, height: int, fps: int, sensor_id: int) -> str:
+    """Return the GStreamer pipeline string for the Jetson CSI camera."""
+    return (
+        f"nvarguscamerasrc sensor-id={sensor_id} ! "
+        f"video/x-raw(memory:NVMM), width={width}, height={height}, "
+        f"framerate={fps}/1 ! "
+        f"nvvidconv ! video/x-raw, format=BGRx ! "
+        f"videoconvert ! video/x-raw, format=BGR ! appsink"
+    )
+
+CAMERA_CSI_PIPELINE = _build_csi_pipeline(
+    CAMERA_CSI_WIDTH, CAMERA_CSI_HEIGHT, CAMERA_CSI_FPS, CAMERA_CSI_SENSOR_ID
+)
+
+# USB camera device index — used only when CAMERA_USE_CSI is False.
+# Overridable via FISH_CAMERA_INDEX env variable.
 CAMERA_INDEX   = int(_os.environ.get("FISH_CAMERA_INDEX", "0"))
 CAMERA_MAX_DIM = 640   # resize camera frames to this max-dim before inference
 
@@ -48,11 +74,11 @@ CAMERA_MAX_DIM = 640   # resize camera frames to this max-dim before inference
 # Relay board: SRD-05VDC-SL-C (active-LOW: relay ON when IN pin is driven LOW)
 # Indicator:   AD22-22DS
 # ─────────────────────────────────────────────────────────────────────────────
-# IN1 → Pin 11  — Application ready / model loaded
-# IN2 → Pin 13  — Detection or camera stream running
-# IN3 → Pin 15  — Detection or camera stream running (paired with IN2)
-# IN4 → Pin 16  — Counting complete
-GPIO_PIN_READY    = 11
-GPIO_PIN_DETECT_A = 13
-GPIO_PIN_DETECT_B = 15
-GPIO_PIN_COMPLETE = 16
+# IN1 → Pin 16  — Application ready / model loaded
+# IN2 → Pin 15  — Detection or camera stream running
+# IN3 → Pin 13  — Detection or camera stream running (paired with IN2)
+# IN4 → Pin 11  — Counting complete
+GPIO_PIN_READY    = 16
+GPIO_PIN_DETECT_A = 15
+GPIO_PIN_DETECT_B = 13
+GPIO_PIN_COMPLETE = 11
