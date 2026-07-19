@@ -39,8 +39,14 @@ PREVIEW_MAX_DIM  = 480  # max dimension of the live-preview (pixels)
 
 # ── FishTracker constants ─────────────────────────────────────────────────────
 # A new track must be detected for this many consecutive frames before being
-# eligible to be counted.  Prevents single-frame ghost detections.
-TRACKER_MIN_HIT_STREAK  = 3
+# eligible to be counted.
+#
+# With COUNTING_LINE_ENABLED=True, the line-crossing gate is the primary quality
+# gate (centroid must physically cross the line).  Set to 1 so that fast fish
+# that cross the line in a single frame are not silently dropped.
+# The YOLO confidence threshold (85%) already rejects ghost detections.
+# Increase to 2–3 only if you see spurious counts from single-frame artefacts.
+TRACKER_MIN_HIT_STREAK  = 1
 
 # Number of frames to keep a lost track in the re-ID registry.  During this
 # window a new track ID that overlaps the lost track's last bounding box is
