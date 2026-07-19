@@ -41,12 +41,14 @@ from PyQt5.QtCore import Qt, pyqtSignal, QThread
 
 from core.config import (
     TARGET_FPS, MAX_DIM,
-    TRACKER_RESET_INTERVAL, PREVIEW_INTERVAL, PREVIEW_MAX_DIM,
+    PREVIEW_INTERVAL, PREVIEW_MAX_DIM,
     DEVICE, CAMERA_INDEX, CAMERA_MAX_DIM,
     CAMERA_USE_CSI, CAMERA_CSI_PIPELINE,
+    DISPLAY_ROTATE_90_CCW,
 )
 from core.video import extract_frames, open_camera
 from core.detector import FishDetector, draw_boxes_on_frame, make_preview_frame
+from core.tracker import FishTracker, draw_counting_line
 from core.gpio_controller import GPIOController
 
 logger = logging.getLogger(__name__)
@@ -136,32 +138,35 @@ class DetectionWorker(QThread):
             self.error_occurred.emit("Model not loaded — check MODEL_PATH in core/config.py")
             return
 
-        seen_ids:      set           = set()
-        detections:    list          = []
-        stopped_at:    int           = -1
-        total:         int           = len(self.frames)
-        last_preview:  Optional[np.ndarray] = None
-        tracker_epoch: int           = 0
+        detections:   list                    = []
+        stopped_at:   int                     = -1
+        total:        int                     = len(self.frames)
+        last_preview: Optional[np.ndarray]    = None
 
+        # One-time tracker reset at job start (clears any state from a previous run)
         self.detector.reset_tracker()
-        logger.info(f"DetectionWorker started — {total} frames, "
-                    f"conf={self.confidence}, threshold={self.threshold}, "
-                    f"device={DEVICE}")
+
+        # Infer frame dimensions for the counting-line pixel position
+        frame_h, frame_w = self.frames[0].shape[:2] if self.frames else (0, 0)
+        tracker = FishTracker(frame_w=frame_w, frame_h=frame_h)
+
+        logger.info(
+            f"DetectionWorker started — {total} frames, "
+            f"conf={self.confidence}, threshold={self.threshold}, "
+            f"device={DEVICE}"
+        )
 
         for idx, frame in enumerate(self.frames):
 
-            # ── Stop-flag check ───────────────────────────────────────────────
+            # ── Stop-flag check ─────────────────────────────────────────────────
             if self._stop.is_set():
                 logger.info(f"Worker stopped at frame {idx}")
                 break
 
-            # ── Periodic ByteTrack reset to cap state growth ──────────────────
-            if idx > 0 and idx % TRACKER_RESET_INTERVAL == 0:
-                self.detector.reset_tracker()
-                tracker_epoch += 1
-                logger.info(f"Tracker reset #{tracker_epoch} at frame {idx}")
+            # NOTE: ByteTrack is NOT reset mid-run.  Resetting would re-assign
+            # track IDs and cause double-counting.  See core/tracker.py.
 
-            # ── YOLO inference ────────────────────────────────────────────────
+            # ── YOLO inference ──────────────────────────────────────────────────
             try:
                 results = self.detector.track(frame, self.confidence)
             except Exception as e:
@@ -172,23 +177,25 @@ class DetectionWorker(QThread):
                     logger.error(f"predict() also failed frame {idx}: {e2} — skip")
                     continue
 
-            # ── Parse results ─────────────────────────────────────────────────
+            # ── Parse raw ByteTrack output ────────────────────────────────────────
             boxes_obj     = results[0].boxes
             fish_in_frame = len(boxes_obj) if boxes_obj else 0
             track_ids: list = []
-            new_fish = 0
 
-            if boxes_obj is not None and boxes_obj.id is not None:
-                for tid in boxes_obj.id.cpu().numpy().tolist():
-                    tid_int = int(tid)
-                    track_ids.append(tid_int)
-                    if tid_int not in seen_ids:
-                        seen_ids.add(tid_int)
-                        new_fish += 1
-
-            unique_so_far = len(seen_ids)
             boxes_list = boxes_obj.xyxy.cpu().numpy().tolist() if fish_in_frame > 0 else []
             confs_list  = boxes_obj.conf.cpu().numpy().tolist() if fish_in_frame > 0 else []
+
+            if boxes_obj is not None and boxes_obj.id is not None:
+                track_ids = [int(tid) for tid in boxes_obj.id.cpu().numpy().tolist()]
+
+            # ── Robust counting via FishTracker ─────────────────────────────────
+            # Applies: hit-streak gate, re-ID de-duplication, line-crossing gate
+            new_fish, unique_so_far = tracker.update(
+                frame_idx=idx,
+                track_ids=track_ids,
+                boxes=boxes_list,
+                frame_shape=frame.shape[:2],
+            )
 
             detections.append({
                 "frame_idx":           idx,
@@ -204,12 +211,18 @@ class DetectionWorker(QThread):
             encode_now = (idx % PREVIEW_INTERVAL == 0)
             if encode_now:
                 try:
-                    last_preview = make_preview_frame(
+                    preview = make_preview_frame(
                         frame, boxes_list, confs_list, track_ids, PREVIEW_MAX_DIM)
+                    # Overlay counting line (in original frame coordinate space)
+                    preview = tracker.draw_counting_line(preview)
+                    # Rotate 90° CCW: fish physically going top→bottom appear left→right
+                    if DISPLAY_ROTATE_90_CCW:
+                        preview = cv2.rotate(preview, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    last_preview = preview
                 except Exception as e:
                     logger.error(f"Preview failed frame {idx}: {e}")
 
-            # ── Emit live update to UI ────────────────────────────────────────
+            # ── Emit live update to UI ──────────────────────────────────────────
             self.frame_ready.emit({
                 "frame_idx":         idx,
                 "total_frames":      total,
@@ -219,7 +232,7 @@ class DetectionWorker(QThread):
                 "is_processing":     True,
             })
 
-            # ── Periodic GPU cache flush ──────────────────────────────────────
+            # ── Periodic GPU cache flush ──────────────────────────────────────────
             if idx % 50 == 0 and torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -229,9 +242,9 @@ class DetectionWorker(QThread):
                 logger.info(f"Threshold {self.threshold} reached at frame {idx}")
                 break
 
-        # ── Finalize ──────────────────────────────────────────────────────────
+        # ── Finalize ────────────────────────────────────────────────────────────
         self.detections = detections
-        unique_fish = len(seen_ids)
+        unique_fish = tracker.total
         n_proc      = len(detections)
         avg         = round(sum(d["fish_count"] for d in detections) / n_proc, 2) \
                       if n_proc else 0
@@ -292,7 +305,7 @@ class CameraWorker(QThread):
             self.camera_error.emit("Model not loaded — check MODEL_PATH in core/config.py")
             return
 
-        # ── Open camera ───────────────────────────────────────────────────────
+        # ── Open camera ──────────────────────────────────────────────────
         try:
             cap = open_camera(self.source)
         except RuntimeError as e:
@@ -300,10 +313,15 @@ class CameraWorker(QThread):
             return
 
         source_label = self.source if isinstance(self.source, str) else f"USB:{self.source}"
-        seen_ids:      set = set()
-        frame_number:  int = 0
-        tracker_epoch: int = 0
+        frame_number: int = 0
+
+        # One-time tracker reset at stream start (clears any state from previous run)
         self.detector.reset_tracker()
+
+        # Tracker is initialised without frame dimensions; they are resolved on
+        # the first frame via the frame_shape argument to tracker.update().
+        tracker = FishTracker()
+
         logger.info(
             f"CameraWorker started — source={source_label}, "
             f"conf={self.confidence}, threshold={self.threshold}"
@@ -316,19 +334,16 @@ class CameraWorker(QThread):
                     logger.warning("Camera read failed — retrying…")
                     continue
 
-                # ── Resize to cap GPU memory ──────────────────────────────────
+                # ── Resize to cap GPU memory ───────────────────────────────────
                 h, w = frame.shape[:2]
                 if max(h, w) > CAMERA_MAX_DIM:
                     scale = CAMERA_MAX_DIM / max(h, w)
                     frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
 
-                # ── Periodic ByteTrack reset ──────────────────────────────────
-                if frame_number > 0 and frame_number % TRACKER_RESET_INTERVAL == 0:
-                    self.detector.reset_tracker()
-                    tracker_epoch += 1
-                    logger.info(f"Camera: tracker reset #{tracker_epoch} at frame {frame_number}")
+                # NOTE: ByteTrack is NOT reset mid-run.  See DetectionWorker for
+                # explanation.  FishTracker handles re-ID de-duplication instead.
 
-                # ── YOLO inference ────────────────────────────────────────────
+                # ── YOLO inference ─────────────────────────────────────────────
                 try:
                     results = self.detector.track(frame, self.confidence)
                 except Exception as e:
@@ -340,24 +355,33 @@ class CameraWorker(QThread):
                         frame_number += 1
                         continue
 
-                # ── Parse results ─────────────────────────────────────────────
+                # ── Parse raw ByteTrack output ────────────────────────────────────
                 boxes_obj     = results[0].boxes
                 fish_in_frame = len(boxes_obj) if boxes_obj else 0
                 track_ids: list = []
 
-                if boxes_obj is not None and boxes_obj.id is not None:
-                    for tid in boxes_obj.id.cpu().numpy().tolist():
-                        tid_int = int(tid)
-                        track_ids.append(tid_int)
-                        seen_ids.add(tid_int)
-
-                unique_so_far = len(seen_ids)
                 boxes_list = boxes_obj.xyxy.cpu().numpy().tolist() if fish_in_frame > 0 else []
                 confs_list  = boxes_obj.conf.cpu().numpy().tolist() if fish_in_frame > 0 else []
 
-                # ── Annotate frame ────────────────────────────────────────────
+                if boxes_obj is not None and boxes_obj.id is not None:
+                    track_ids = [int(tid) for tid in boxes_obj.id.cpu().numpy().tolist()]
+
+                # ── Robust counting via FishTracker ───────────────────────────
+                _new_fish, unique_so_far = tracker.update(
+                    frame_idx=frame_number,
+                    track_ids=track_ids,
+                    boxes=boxes_list,
+                    frame_shape=frame.shape[:2],
+                )
+
+                # ── Annotate & rotate frame for display ───────────────────────
                 annotated = make_preview_frame(
                     frame, boxes_list, confs_list, track_ids, CAMERA_MAX_DIM)
+                # Draw counting line (in original coordinate space)
+                annotated = tracker.draw_counting_line(annotated)
+                # Rotate 90° CCW: fish physically going top→bottom appear left→right
+                if DISPLAY_ROTATE_90_CCW:
+                    annotated = cv2.rotate(annotated, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
                 # ── Emit to UI ────────────────────────────────────────────────
                 self.camera_frame.emit({
@@ -383,13 +407,13 @@ class CameraWorker(QThread):
             cap.release()
             logger.info(
                 f"CameraWorker stopped — frames: {frame_number}, "
-                f"unique fish: {len(seen_ids)}"
+                f"unique fish: {tracker.total}"
             )
             self.camera_stopped.emit({
                 "total_frames":      frame_number,
-                "total_fish":        len(seen_ids),
+                "total_fish":        tracker.total,
                 "threshold_reached": (
-                    self.threshold is not None and len(seen_ids) >= self.threshold
+                    self.threshold is not None and tracker.total >= self.threshold
                 ),
             })
 
@@ -835,7 +859,7 @@ class FishDetectionApp(QMainWindow):
             msg += f"   avg {avg}/frame\n"
         if sf >= 0:
             msg += f"   Threshold hit at frame {sf}\n"
-        msg += "\nℹ️  ByteTrack — no double-counting."
+        msg += "\nℹ️  FishTracker: line-crossing + re-ID + hit-streak gate."
         self.log(msg)
         self.statusBar().showMessage("✅ Detection complete — browse frames with arrows")
 
@@ -856,6 +880,8 @@ class FishDetectionApp(QMainWindow):
         """
         Render frame idx from in-memory data.
         No HTTP call — draws boxes with OpenCV and converts to QPixmap directly.
+        Frame is annotated with the counting line then rotated 90° CCW so the
+        display orientation matches the live-preview (fish appear left→right).
         """
         if not self.detections or not self.frames or idx >= len(self.detections):
             return
@@ -870,6 +896,11 @@ class FishDetectionApp(QMainWindow):
                 det.get("confidences", []),
                 det.get("track_ids", []),
             )
+            # Overlay counting line (original coordinate space)
+            annotated = draw_counting_line(annotated)
+            # Rotate 90° CCW for display (fish appear left→right)
+            if DISPLAY_ROTATE_90_CCW:
+                annotated = cv2.rotate(annotated, cv2.ROTATE_90_COUNTERCLOCKWISE)
             self._display_pixmap(_bgr_to_pixmap(annotated))
 
             self.frame_info_lbl.setText(

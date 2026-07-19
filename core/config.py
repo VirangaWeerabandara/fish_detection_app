@@ -31,9 +31,38 @@ MAX_DIM    = 800    # downscale frames to this maximum dimension on ingest
 # ─────────────────────────────────────────────────────────────────────────────
 # Detection / tracking
 # ─────────────────────────────────────────────────────────────────────────────
-TRACKER_RESET_INTERVAL = 150  # reset ByteTrack state every N frames
-PREVIEW_INTERVAL       = 4    # generate a live-preview frame every N frames
-PREVIEW_MAX_DIM        = 480  # max dimension of the live-preview (pixels)
+# NOTE: No TRACKER_RESET_INTERVAL — ByteTrack is never reset mid-run.
+# Resetting mid-run re-assigns track IDs and causes double-counting.
+
+PREVIEW_INTERVAL = 4    # generate a live-preview frame every N frames
+PREVIEW_MAX_DIM  = 480  # max dimension of the live-preview (pixels)
+
+# ── FishTracker constants ─────────────────────────────────────────────────────
+# A new track must be detected for this many consecutive frames before being
+# eligible to be counted.  Prevents single-frame ghost detections.
+TRACKER_MIN_HIT_STREAK  = 3
+
+# Number of frames to keep a lost track in the re-ID registry.  During this
+# window a new track ID that overlaps the lost track's last bounding box is
+# treated as a re-ID (same fish), not a new fish.
+TRACKER_LOST_TTL        = 60
+
+# Minimum IoU between a new track's box and a lost track's last box for the
+# re-ID match to fire.
+TRACKER_REID_IOU_THRESH = 0.35
+
+# ── Line-crossing counting ────────────────────────────────────────────────────
+# Fish swim top → bottom through the frame.  A horizontal counting line is
+# placed at COUNTING_LINE_POSITION (0.5 = 50% of frame height).  A fish is
+# counted only when its centroid crosses the line from above to below.
+COUNTING_LINE_ENABLED  = True    # set False to disable line-crossing gate
+COUNTING_LINE_AXIS     = "y"     # 'y' = horizontal line (fixed Y coordinate)
+COUNTING_LINE_POSITION = 0.5     # fraction of frame height (0.0 – 1.0)
+
+# ── Display rotation ──────────────────────────────────────────────────────────
+# Rotate the preview/annotated frame 90° counter-clockwise before displaying.
+# This makes fish that physically travel top→bottom appear left→right in the UI.
+DISPLAY_ROTATE_90_CCW  = True
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Live camera
