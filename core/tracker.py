@@ -257,14 +257,25 @@ class FishTracker:
                 self._line_side[tid] = coord
 
                 if prev_coord is None:
-                    # First observation of this track — record side, don't count yet
-                    continue
-
-                # Count only on the downward transition (top → bottom for axis='y')
-                # Allow both directions if you want bidirectional counting.
-                crossed = (prev_coord < self._line_px <= coord)
-                if not crossed:
-                    continue
+                    # First observation of this track.
+                    #
+                    # Fast fish can cross the line between two sampled frames,
+                    # so when first detected they may already be on the "past"
+                    # side of the line (below it for axis='y').  In that case
+                    # count immediately — they must have entered from above.
+                    #
+                    # If they are still above the line, record the position and
+                    # wait for the crossing transition in a later frame.
+                    if coord < self._line_px:
+                        # Fish is above the line — not yet crossed, wait
+                        continue
+                    # Fish is already past the line — count it now
+                    # (fall through to counting block below)
+                else:
+                    # Subsequent detection: require an explicit top→bottom crossing
+                    crossed = (prev_coord < self._line_px <= coord)
+                    if not crossed:
+                        continue
 
             # ── Count this fish ────────────────────────────────────────────
             self.seen_ids.add(tid)
