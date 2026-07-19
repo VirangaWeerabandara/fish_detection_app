@@ -45,7 +45,7 @@ TRACKER_MIN_HIT_STREAK  = 3
 # Number of frames to keep a lost track in the re-ID registry.  During this
 # window a new track ID that overlaps the lost track's last bounding box is
 # treated as a re-ID (same fish), not a new fish.
-TRACKER_LOST_TTL        = 60
+TRACKER_LOST_TTL        = 120
 
 # Minimum IoU between a new track's box and a lost track's last box for the
 # re-ID match to fire.
