@@ -1,0 +1,27 @@
+tracker_type: botsort
+
+# ── Detection thresholds ──────────────────────────────────────────────────────
+# track_high_thresh: Detections above this seed new tracks.
+track_high_thresh: 0.55
+track_low_thresh: 0.10
+new_track_thresh: 0.55
+
+# ── Track memory ──────────────────────────────────────────────────────────────
+# track_buffer: Number of frames a track is kept alive after vanishing.
+# Set to 15 to give the tracker some memory to re-identify fast-moving fish.
+track_buffer: 15
+
+# ── Association threshold ─────────────────────────────────────────────────────
+# match_thresh: Maximum allowed cost (1 - IoU). 
+# Higher means MORE permissive! 0.9 means we allow matches with just 10% overlap.
+# Botsort uses Kalman Filter to predict motion, so even fast fish will have overlap.
+match_thresh: 0.9
+
+# fuse_score: Multiplies detection confidence into the matching matrix.
+fuse_score: True
+
+# BoT-SORT specific settings
+gmc_method: sparseOptFlow
+proximity_thresh: 0.5
+appearance_thresh: 0.25
+with_reid: False

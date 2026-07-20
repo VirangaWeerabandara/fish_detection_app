@@ -41,27 +41,34 @@ PREVIEW_MAX_DIM  = 480  # max dimension of the live-preview (pixels)
 # A new track must be detected for this many consecutive frames before being
 # eligible to be counted.
 #
-# With COUNTING_LINE_ENABLED=True, the line-crossing gate is the primary quality
-# gate (centroid must physically cross the line).  Set to 1 so that fast fish
-# that cross the line in a single frame are not silently dropped.
-# The YOLO confidence threshold (85%) already rejects ghost detections.
-# Increase to 2–3 only if you see spurious counts from single-frame artefacts.
+# Set to 3: a track must appear in 3 consecutive frames before it can be
+# counted.  This filters ID-fragment ghosts produced when ByteTrack briefly
+# loses and re-assigns a track (the fragment only survives 1–2 frames).
+# With COUNTING_LINE_ENABLED=True this is a secondary gate — line crossing
+# is still required.  With it disabled this is the primary quality gate.
+# Lower to 1 only if fast fish crossing in a single frame are being missed.
 TRACKER_MIN_HIT_STREAK  = 1
 
-# Number of frames to keep a lost track in the re-ID registry.  During this
-# window a new track ID that overlaps the lost track's last bounding box is
-# treated as a re-ID (same fish), not a new fish.
-TRACKER_LOST_TTL        = 120
+# Number of frames to keep a lost COUNTED track in the re-ID registry.
+# Raised to 60 frames: at 60 fps this is ~1 second; at 30 fps ~2 seconds.
+# The previous value (20 frames) was only 0.33 s at 60 fps — too short for a
+# fish that disappears behind another fish momentarily.  When the registry
+# expired before the fish reappeared it was assigned a new ID and double-counted.
+# The HIGH IoU threshold (0.80) still prevents past positions from blocking
+# genuinely new fish in the same channel area.
+TRACKER_LOST_TTL        = 60
 
-# Minimum IoU between a new track's box and a lost track's last box for the
-# re-ID match to fire.
-TRACKER_REID_IOU_THRESH = 0.35
+# Minimum IoU between a new track's box and a recently-lost counted fish's
+# last box for the re-ID block to fire.
+# MUST be HIGH (0.80+) in a busy channel — a low threshold causes every
+# new fish that passes through the same area to be silently blocked.
+TRACKER_REID_IOU_THRESH = 0.80
 
 # ── Line-crossing counting ────────────────────────────────────────────────────
 # Fish swim top → bottom through the frame.  A horizontal counting line is
 # placed at COUNTING_LINE_POSITION (0.5 = 50% of frame height).  A fish is
 # counted only when its centroid crosses the line from above to below.
-COUNTING_LINE_ENABLED  = True    # set False to disable line-crossing gate
+COUNTING_LINE_ENABLED  = False    # set False to disable line-crossing gate
 COUNTING_LINE_AXIS     = "y"     # 'y' = horizontal line (fixed Y coordinate)
 COUNTING_LINE_POSITION = 0.5     # fraction of frame height (0.0 – 1.0)
 

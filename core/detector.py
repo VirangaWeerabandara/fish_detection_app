@@ -62,9 +62,11 @@ class FishDetector:
         Run tracked inference (ByteTrack) on a single frame.
         Returns ultralytics Results list.
         """
+        import os
+        tracker_yaml = os.path.join(os.path.dirname(__file__), "bytetrack.yaml")
         return self.model.track(
             source=frame, persist=True, conf=confidence,
-            iou=0.45, tracker="bytetrack.yaml",
+            iou=0.45, tracker=tracker_yaml,
             device=self.device, verbose=False,
         )
 
