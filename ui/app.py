@@ -44,6 +44,7 @@ from core.config import (
     TRACKER_RESET_INTERVAL, PREVIEW_INTERVAL, PREVIEW_MAX_DIM,
     DEVICE, CAMERA_INDEX, CAMERA_MAX_DIM,
     CAMERA_USE_CSI, CAMERA_CSI_PIPELINE,
+    ROTATE_DISPLAY_90_CCW
 )
 from core.video import extract_frames, open_camera
 from core.detector import FishDetector, draw_boxes_on_frame, make_preview_frame
@@ -57,6 +58,9 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 def _bgr_to_pixmap(frame_bgr: np.ndarray) -> QPixmap:
     """Convert an OpenCV BGR numpy array to a QPixmap (no file I/O, no encoding)."""
+    if ROTATE_DISPLAY_90_CCW:
+        frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     h, w, ch = rgb.shape
     # tobytes() makes a copy so QImage owns the data safely
@@ -469,7 +473,7 @@ class FishDetectionApp(QMainWindow):
         row_conf.addWidget(QLabel("Detection Confidence (0–100):"))
         self.confidence_spin = QSpinBox()
         self.confidence_spin.setRange(0, 100)
-        self.confidence_spin.setValue(85)
+        self.confidence_spin.setValue(65)
         self.confidence_spin.setSuffix("%")
         row_conf.addWidget(self.confidence_spin)
         left.addLayout(row_conf)
