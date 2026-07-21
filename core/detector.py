@@ -27,9 +27,7 @@ class FishDetector:
     Usage
     ─────
     detector = FishDetector()          # loads model at construction time
-    results  = detector.track(frame, confidence=0.85)
     results  = detector.predict(frame, confidence=0.85)
-    detector.reset_tracker()           # wipe ByteTrack state between runs
     """
 
     def __init__(self):
@@ -48,30 +46,9 @@ class FishDetector:
     def is_loaded(self) -> bool:
         return self.model is not None
 
-    def reset_tracker(self):
-        """Wipe ByteTrack internal state so track IDs start fresh."""
-        try:
-            if self.model and hasattr(self.model, "predictor") \
-                    and self.model.predictor is not None:
-                self.model.predictor = None
-        except Exception as e:
-            logger.warning(f"reset_tracker: {e}")
-
-    def track(self, frame: np.ndarray, confidence: float) -> list:
-        """
-        Run tracked inference (ByteTrack) on a single frame.
-        Returns ultralytics Results list.
-        """
-        return self.model.track(
-            source=frame, persist=True, conf=confidence,
-            iou=0.45, tracker="bytetrack.yaml",
-            device=self.device, verbose=False,
-        )
-
     def predict(self, frame: np.ndarray, confidence: float) -> list:
         """
-        Run plain detection (no tracking) on a single frame.
-        Used as fallback when track() fails.
+        Run plain detection on a single frame.
         """
         return self.model.predict(
             source=frame, conf=confidence,
@@ -86,7 +63,6 @@ def draw_boxes_on_frame(
     frame: np.ndarray,
     boxes: list,
     confidences: list,
-    track_ids: list,
 ) -> np.ndarray:
     """
     Draw detection bounding boxes on a *copy* of frame.
@@ -96,7 +72,6 @@ def draw_boxes_on_frame(
     frame       : BGR numpy array
     boxes       : list of [x1, y1, x2, y2] (pixel coords)
     confidences : list of float confidence scores
-    track_ids   : list of integer track IDs (may be shorter than boxes)
 
     Returns
     ───────
@@ -105,8 +80,7 @@ def draw_boxes_on_frame(
     out = frame.copy()
     for i, (box, conf) in enumerate(zip(boxes, confidences)):
         x1, y1, x2, y2 = map(int, box)
-        tid   = track_ids[i] if i < len(track_ids) else None
-        label = f"#{tid} {conf:.2f}" if tid is not None else f"Fish {conf:.2f}"
+        label = f"Fish {conf:.2f}"
 
         cv2.rectangle(out, (x1, y1), (x2, y2), (0, 220, 80), 2)
         (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
@@ -120,14 +94,13 @@ def make_preview_frame(
     frame: np.ndarray,
     boxes: list,
     confidences: list,
-    track_ids: list,
     max_dim: int = 480,
 ) -> np.ndarray:
     """
     Return a downscaled, annotated BGR frame suitable for live preview.
     Returns a numpy array (no encoding — the UI converts to QPixmap directly).
     """
-    out = draw_boxes_on_frame(frame, boxes, confidences, track_ids)
+    out = draw_boxes_on_frame(frame, boxes, confidences)
     h, w = out.shape[:2]
     if max(h, w) > max_dim:
         s = max_dim / max(h, w)

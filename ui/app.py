@@ -47,6 +47,7 @@ from core.config import (
 )
 from core.video import extract_frames, open_camera
 from core.detector import FishDetector, draw_boxes_on_frame, make_preview_frame
+from core.counter import DetectionLineCounter
 from core.gpio_controller import GPIOController
 
 logger = logging.getLogger(__name__)
@@ -118,12 +119,14 @@ class DetectionWorker(QThread):
                  frames: list,
                  detector: FishDetector,
                  confidence: float,
-                 threshold: Optional[int] = None):
+                 threshold: Optional[int] = None,
+                 counter_kwargs: dict = None):
         super().__init__()
         self.frames     = frames
         self.detector   = detector
         self.confidence = confidence
         self.threshold  = threshold
+        self.counter_kwargs = counter_kwargs or {}
         self._stop      = threading.Event()
         self.detections: list = []        # available after processing_done
 
@@ -142,8 +145,9 @@ class DetectionWorker(QThread):
         total:         int           = len(self.frames)
         last_preview:  Optional[np.ndarray] = None
         tracker_epoch: int           = 0
+        
+        counter = DetectionLineCounter(**self.counter_kwargs)
 
-        self.detector.reset_tracker()
         logger.info(f"DetectionWorker started — {total} frames, "
                     f"conf={self.confidence}, threshold={self.threshold}, "
                     f"device={DEVICE}")
@@ -155,57 +159,55 @@ class DetectionWorker(QThread):
                 logger.info(f"Worker stopped at frame {idx}")
                 break
 
-            # ── Periodic ByteTrack reset to cap state growth ──────────────────
-            if idx > 0 and idx % TRACKER_RESET_INTERVAL == 0:
-                self.detector.reset_tracker()
-                tracker_epoch += 1
-                logger.info(f"Tracker reset #{tracker_epoch} at frame {idx}")
-
             # ── YOLO inference ────────────────────────────────────────────────
             try:
-                results = self.detector.track(frame, self.confidence)
+                results = self.detector.predict(frame, self.confidence)
             except Exception as e:
-                logger.warning(f"track() failed frame {idx}: {e} — falling back")
-                try:
-                    results = self.detector.predict(frame, self.confidence)
-                except Exception as e2:
-                    logger.error(f"predict() also failed frame {idx}: {e2} — skip")
-                    continue
+                logger.error(f"predict() failed frame {idx}: {e} — skip")
+                continue
 
             # ── Parse results ─────────────────────────────────────────────────
             boxes_obj     = results[0].boxes
             fish_in_frame = len(boxes_obj) if boxes_obj else 0
-            track_ids: list = []
-            new_fish = 0
 
-            if boxes_obj is not None and boxes_obj.id is not None:
-                for tid in boxes_obj.id.cpu().numpy().tolist():
-                    tid_int = int(tid)
-                    track_ids.append(tid_int)
-                    if tid_int not in seen_ids:
-                        seen_ids.add(tid_int)
-                        new_fish += 1
-
-            unique_so_far = len(seen_ids)
             boxes_list = boxes_obj.xyxy.cpu().numpy().tolist() if fish_in_frame > 0 else []
             confs_list  = boxes_obj.conf.cpu().numpy().tolist() if fish_in_frame > 0 else []
+
+            # ── Hybrid Fish Counter ───────────────────────────────────────────
+            counter_detections = []
+            for i, box in enumerate(boxes_list):
+                x1, y1, x2, y2 = box
+                w = x2 - x1
+                h = y2 - y1
+                conf = confs_list[i]
+                counter_detections.append((x1, y1, w, h, conf))
+                
+            counter.process_frame(idx, counter_detections)
+            unique_so_far = counter.get_count()
 
             detections.append({
                 "frame_idx":           idx,
                 "fish_count":          fish_in_frame,
-                "new_fish_this_frame": new_fish,
                 "unique_fish_count":   unique_so_far,
-                "track_ids":           track_ids,
                 "boxes":               boxes_list,
                 "confidences":         confs_list,
             })
 
-            # ── Live preview (downscaled numpy array, no encoding) ────────────
+            # ── Live preview ──────────────────────────────────────────────────
             encode_now = (idx % PREVIEW_INTERVAL == 0)
             if encode_now:
                 try:
-                    last_preview = make_preview_frame(
-                        frame, boxes_list, confs_list, track_ids, PREVIEW_MAX_DIM)
+                    annotated = counter.annotate_frame(frame)
+                    if len(boxes_list) > 0:
+                        annotated = draw_boxes_on_frame(annotated, boxes_list, confs_list)
+                    
+                    # scale down
+                    h, w = annotated.shape[:2]
+                    if max(h, w) > PREVIEW_MAX_DIM:
+                        s = PREVIEW_MAX_DIM / max(h, w)
+                        annotated = cv2.resize(annotated, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+                        
+                    last_preview = annotated
                 except Exception as e:
                     logger.error(f"Preview failed frame {idx}: {e}")
 
@@ -224,14 +226,15 @@ class DetectionWorker(QThread):
                 torch.cuda.empty_cache()
 
             # ── Threshold check ───────────────────────────────────────────────
-            if self.threshold is not None and unique_so_far >= self.threshold:
+            if self.threshold is not None and counter.get_count() >= self.threshold:
                 stopped_at = idx
                 logger.info(f"Threshold {self.threshold} reached at frame {idx}")
                 break
 
         # ── Finalize ──────────────────────────────────────────────────────────
+        counter.flush(total - 1)
         self.detections = detections
-        unique_fish = len(seen_ids)
+        unique_fish = counter.get_count()
         n_proc      = len(detections)
         avg         = round(sum(d["fish_count"] for d in detections) / n_proc, 2) \
                       if n_proc else 0
@@ -275,12 +278,14 @@ class CameraWorker(QThread):
                  source,           # int (USB device index) or str (GStreamer pipeline)
                  detector: FishDetector,
                  confidence: float,
-                 threshold: Optional[int] = None):
+                 threshold: Optional[int] = None,
+                 counter_kwargs: dict = None):
         super().__init__()
         self.source    = source
         self.detector  = detector
         self.confidence = confidence
         self.threshold  = threshold
+        self.counter_kwargs = counter_kwargs or {}
         self._stop      = threading.Event()
 
     def stop(self):
@@ -303,7 +308,9 @@ class CameraWorker(QThread):
         seen_ids:      set = set()
         frame_number:  int = 0
         tracker_epoch: int = 0
-        self.detector.reset_tracker()
+        
+        counter = DetectionLineCounter(**self.counter_kwargs)
+        
         logger.info(
             f"CameraWorker started — source={source_label}, "
             f"conf={self.confidence}, threshold={self.threshold}"
@@ -322,42 +329,42 @@ class CameraWorker(QThread):
                     scale = CAMERA_MAX_DIM / max(h, w)
                     frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
 
-                # ── Periodic ByteTrack reset ──────────────────────────────────
-                if frame_number > 0 and frame_number % TRACKER_RESET_INTERVAL == 0:
-                    self.detector.reset_tracker()
-                    tracker_epoch += 1
-                    logger.info(f"Camera: tracker reset #{tracker_epoch} at frame {frame_number}")
-
                 # ── YOLO inference ────────────────────────────────────────────
                 try:
-                    results = self.detector.track(frame, self.confidence)
+                    results = self.detector.predict(frame, self.confidence)
                 except Exception as e:
-                    logger.warning(f"track() failed frame {frame_number}: {e} — falling back")
-                    try:
-                        results = self.detector.predict(frame, self.confidence)
-                    except Exception as e2:
-                        logger.error(f"predict() also failed frame {frame_number}: {e2} — skip")
-                        frame_number += 1
-                        continue
+                    logger.error(f"predict() failed frame {frame_number}: {e} — skip")
+                    frame_number += 1
+                    continue
 
                 # ── Parse results ─────────────────────────────────────────────
                 boxes_obj     = results[0].boxes
                 fish_in_frame = len(boxes_obj) if boxes_obj else 0
-                track_ids: list = []
 
-                if boxes_obj is not None and boxes_obj.id is not None:
-                    for tid in boxes_obj.id.cpu().numpy().tolist():
-                        tid_int = int(tid)
-                        track_ids.append(tid_int)
-                        seen_ids.add(tid_int)
-
-                unique_so_far = len(seen_ids)
                 boxes_list = boxes_obj.xyxy.cpu().numpy().tolist() if fish_in_frame > 0 else []
                 confs_list  = boxes_obj.conf.cpu().numpy().tolist() if fish_in_frame > 0 else []
+                
+                # ── Hybrid Fish Counter ───────────────────────────────────────────
+                counter_detections = []
+                for i, box in enumerate(boxes_list):
+                    x1, y1, x2, y2 = box
+                    w = x2 - x1
+                    h = y2 - y1
+                    conf = confs_list[i]
+                    counter_detections.append((x1, y1, w, h, conf))
+                    
+                counter.process_frame(frame_number, counter_detections)
+                unique_so_far = counter.get_count()
 
                 # ── Annotate frame ────────────────────────────────────────────
-                annotated = make_preview_frame(
-                    frame, boxes_list, confs_list, track_ids, CAMERA_MAX_DIM)
+                annotated = counter.annotate_frame(frame)
+                if len(boxes_list) > 0:
+                    annotated = draw_boxes_on_frame(annotated, boxes_list, confs_list)
+                
+                h, w = annotated.shape[:2]
+                if max(h, w) > CAMERA_MAX_DIM:
+                    s = CAMERA_MAX_DIM / max(h, w)
+                    annotated = cv2.resize(annotated, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
 
                 # ── Emit to UI ────────────────────────────────────────────────
                 self.camera_frame.emit({
@@ -381,15 +388,17 @@ class CameraWorker(QThread):
 
         finally:
             cap.release()
+            counter.flush(frame_number - 1)
+            final_count = counter.get_count()
             logger.info(
                 f"CameraWorker stopped — frames: {frame_number}, "
-                f"unique fish: {len(seen_ids)}"
+                f"hybrid fish count: {final_count}"
             )
             self.camera_stopped.emit({
                 "total_frames":      frame_number,
-                "total_fish":        len(seen_ids),
+                "total_fish":        final_count,
                 "threshold_reached": (
-                    self.threshold is not None and len(seen_ids) >= self.threshold
+                    self.threshold is not None and final_count >= self.threshold
                 ),
             })
 
@@ -474,6 +483,55 @@ class FishDetectionApp(QMainWindow):
         # 2. Configure
         left.addWidget(self._section_lbl("2. Configure Detection", section_font))
 
+        # Counter Params
+        row_line = QHBoxLayout()
+        row_line.addWidget(QLabel("Line Y:"))
+        self.line_y_spin = QSpinBox()
+        self.line_y_spin.setRange(0, 4000)
+        self.line_y_spin.setValue(540)
+        row_line.addWidget(self.line_y_spin)
+        left.addLayout(row_line)
+
+        row_band = QHBoxLayout()
+        row_band.addWidget(QLabel("Band PX:"))
+        self.band_px_spin = QSpinBox()
+        self.band_px_spin.setRange(1, 1000)
+        self.band_px_spin.setValue(90)
+        row_band.addWidget(self.band_px_spin)
+        left.addLayout(row_band)
+
+        row_xtol = QHBoxLayout()
+        row_xtol.addWidget(QLabel("X Tolerance:"))
+        self.x_tolerance_spin = QSpinBox()
+        self.x_tolerance_spin.setRange(1, 1000)
+        self.x_tolerance_spin.setValue(150)
+        row_xtol.addWidget(self.x_tolerance_spin)
+        left.addLayout(row_xtol)
+
+        row_ytol = QHBoxLayout()
+        row_ytol.addWidget(QLabel("Y Tolerance:"))
+        self.y_tolerance_spin = QSpinBox()
+        self.y_tolerance_spin.setRange(1, 1000)
+        self.y_tolerance_spin.setValue(230)
+        row_ytol.addWidget(self.y_tolerance_spin)
+        left.addLayout(row_ytol)
+
+        row_gap = QHBoxLayout()
+        row_gap.addWidget(QLabel("Max Frame Gap:"))
+        self.max_frame_gap_spin = QSpinBox()
+        self.max_frame_gap_spin.setRange(1, 100)
+        self.max_frame_gap_spin.setValue(5)
+        row_gap.addWidget(self.max_frame_gap_spin)
+        left.addLayout(row_gap)
+        
+        row_cconf = QHBoxLayout()
+        row_cconf.addWidget(QLabel("Counter Conf (%):"))
+        self.conf_thresh_spin = QSpinBox()
+        self.conf_thresh_spin.setRange(0, 100)
+        self.conf_thresh_spin.setValue(15)
+        row_cconf.addWidget(self.conf_thresh_spin)
+        left.addLayout(row_cconf)
+
         row_thr = QHBoxLayout()
         row_thr.addWidget(QLabel("Fish Count Threshold:"))
         self.threshold_spin = QSpinBox()
@@ -486,7 +544,7 @@ class FishDetectionApp(QMainWindow):
         row_conf.addWidget(QLabel("Detection Confidence (0–100):"))
         self.confidence_spin = QSpinBox()
         self.confidence_spin.setRange(0, 100)
-        self.confidence_spin.setValue(85)
+        self.confidence_spin.setValue(15)
         self.confidence_spin.setSuffix("%")
         row_conf.addWidget(self.confidence_spin)
         left.addLayout(row_conf)
@@ -737,8 +795,17 @@ class FishDetectionApp(QMainWindow):
         if self.gpio:
             self.gpio.set_detecting(True)
 
+        counter_kwargs = {
+            "line_y": self.line_y_spin.value(),
+            "band_px": self.band_px_spin.value(),
+            "x_tolerance": self.x_tolerance_spin.value(),
+            "y_tolerance": self.y_tolerance_spin.value(),
+            "max_frame_gap": self.max_frame_gap_spin.value(),
+            "conf_thresh": self.conf_thresh_spin.value() / 100.0
+        }
+
         self.det_worker = DetectionWorker(
-            self.frames, self.detector, confidence, threshold)
+            self.frames, self.detector, confidence, threshold, counter_kwargs)
         self.det_worker.frame_ready.connect(self.on_frame_update)
         self.det_worker.processing_done.connect(self.on_processing_done)
         self.det_worker.error_occurred.connect(self.on_processing_error)
@@ -936,11 +1003,21 @@ class FishDetectionApp(QMainWindow):
             f"   Threshold: {thr if thr else 'none'}"
         )
 
+        counter_kwargs = {
+            "line_y": self.line_y_spin.value(),
+            "band_px": self.band_px_spin.value(),
+            "x_tolerance": self.x_tolerance_spin.value(),
+            "y_tolerance": self.y_tolerance_spin.value(),
+            "max_frame_gap": self.max_frame_gap_spin.value(),
+            "conf_thresh": self.conf_thresh_spin.value() / 100.0
+        }
+
         self.cam_worker = CameraWorker(
             source=source,
             detector=self.detector,
             confidence=conf,
             threshold=thr,
+            counter_kwargs=counter_kwargs
         )
         self.cam_worker.camera_frame.connect(self.on_camera_frame)
         self.cam_worker.camera_stopped.connect(self.on_camera_stopped)
