@@ -146,9 +146,12 @@ class FastFishTracker:
                 curr_y = t.center[1]
                 t.history.append(t.center)
                 
-                # Check for line crossing
+                # Check for line crossing (Option 1: Bounding Box Intersection or Center Crossing)
                 if t.state == "TRACKING":
-                    if prev_y < line_y and curr_y >= line_y:
+                    y1 = t.bbox[1]
+                    y2 = t.bbox[3]
+                    # Count if the bounding box straddles the line, or if the center completely jumped over it
+                    if (y1 <= line_y and y2 >= line_y) or (prev_y < line_y and curr_y >= line_y):
                         t.state = "COUNTED"
                         self.total_counted += 1
 
@@ -156,6 +159,14 @@ class FastFishTracker:
         for j, bbox in enumerate(boxes_xyxy):
             if j not in matched_boxes:
                 t = Track(self.next_id, bbox)
+                
+                # If a fish appears for the very first time exactly on the line, count it immediately
+                y1 = bbox[1]
+                y2 = bbox[3]
+                if y1 <= line_y and y2 >= line_y:
+                    t.state = "COUNTED"
+                    self.total_counted += 1
+                    
                 self.tracks[self.next_id] = t
                 self.next_id += 1
                 
