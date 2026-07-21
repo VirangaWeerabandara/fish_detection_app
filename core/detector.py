@@ -12,7 +12,8 @@ import numpy as np
 import logging
 from typing import Optional
 
-from core.config import MODEL_PATH, DEVICE
+from core.config import MODEL_PATH, DEVICE, FAST_TRACKER_LINE_FRAC
+from core.fast_tracker import FastFishTracker
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class FishDetector:
             self.model = YOLO(str(MODEL_PATH))
             logger.info(f"Model loaded: {MODEL_PATH}")
             print(f"✅ Model loaded: {MODEL_PATH}")
+            self.tracker = FastFishTracker()
         except Exception as e:
             logger.error(f"Model load failed: {e}")
             print(f"❌ Model load failed: {e}")
@@ -48,25 +50,39 @@ class FishDetector:
     def is_loaded(self) -> bool:
         return self.model is not None
 
-    def reset_tracker(self):
-        """Wipe ByteTrack internal state so track IDs start fresh."""
+    def reset_tracker(self, full=False):
+        """Wipe tracker internal state so track IDs start fresh."""
         try:
-            if self.model and hasattr(self.model, "predictor") \
-                    and self.model.predictor is not None:
-                self.model.predictor = None
+            if hasattr(self, 'tracker'):
+                if full:
+                    self.tracker.full_reset()
+                else:
+                    self.tracker.reset()
         except Exception as e:
             logger.warning(f"reset_tracker: {e}")
 
-    def track(self, frame: np.ndarray, confidence: float) -> list:
+    def track(self, frame: np.ndarray, confidence: float) -> dict:
         """
-        Run tracked inference (ByteTrack) on a single frame.
-        Returns ultralytics Results list.
+        Run inference and custom fast tracking on a single frame.
+        Returns a dict: {track_ids: list, boxes: list, total_counted: int}
         """
-        return self.model.track(
-            source=frame, persist=True, conf=confidence,
-            iou=0.45, tracker="bytetrack.yaml",
-            device=self.device, verbose=False,
+        results = self.model.predict(
+            source=frame, conf=confidence,
+            iou=0.45, device=self.device, verbose=False,
         )
+        boxes_obj = results[0].boxes
+        
+        boxes_list = boxes_obj.xyxy.cpu().numpy().tolist() if boxes_obj else []
+        confs_list = boxes_obj.conf.cpu().numpy().tolist() if boxes_obj else []
+        
+        out_ids, out_boxes, total = self.tracker.update(boxes_list, frame.shape[0])
+        
+        return {
+            "track_ids": out_ids,
+            "boxes": out_boxes,
+            "confidences": [1.0] * len(out_boxes), # Mock confidences for tracked boxes
+            "total_counted": total
+        }
 
     def predict(self, frame: np.ndarray, confidence: float) -> list:
         """
@@ -103,6 +119,12 @@ def draw_boxes_on_frame(
     Annotated BGR numpy array (new copy, original unchanged).
     """
     out = frame.copy()
+    
+    # Draw Counting Line
+    line_y = int(frame.shape[0] * FAST_TRACKER_LINE_FRAC)
+    cv2.line(out, (0, line_y), (frame.shape[1], line_y), (255, 255, 0), 2)
+    cv2.putText(out, "Counting Line", (10, line_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
     for i, (box, conf) in enumerate(zip(boxes, confidences)):
         x1, y1, x2, y2 = map(int, box)
         tid   = track_ids[i] if i < len(track_ids) else None

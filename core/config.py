@@ -81,3 +81,11 @@ GPIO_PIN_READY    = 16
 GPIO_PIN_DETECT_A = 15
 GPIO_PIN_DETECT_B = 13
 GPIO_PIN_COMPLETE = 11
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fast Fish Tracker
+# ─────────────────────────────────────────────────────────────────────────────
+FAST_TRACKER_MAX_MISSING = 2
+FAST_TRACKER_LINE_FRAC   = 0.6
+FAST_TRACKER_MAX_Y_DIST  = 400
+FAST_TRACKER_MAX_X_DIST  = 100

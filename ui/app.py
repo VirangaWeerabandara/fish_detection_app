@@ -143,7 +143,7 @@ class DetectionWorker(QThread):
         last_preview:  Optional[np.ndarray] = None
         tracker_epoch: int           = 0
 
-        self.detector.reset_tracker()
+        self.detector.reset_tracker(full=True)
         logger.info(f"DetectionWorker started — {total} frames, "
                     f"conf={self.confidence}, threshold={self.threshold}, "
                     f"device={DEVICE}")
@@ -161,34 +161,25 @@ class DetectionWorker(QThread):
                 tracker_epoch += 1
                 logger.info(f"Tracker reset #{tracker_epoch} at frame {idx}")
 
-            # ── YOLO inference ────────────────────────────────────────────────
+            # ── YOLO inference & Tracking ─────────────────────────────────────
             try:
                 results = self.detector.track(frame, self.confidence)
             except Exception as e:
-                logger.warning(f"track() failed frame {idx}: {e} — falling back")
-                try:
-                    results = self.detector.predict(frame, self.confidence)
-                except Exception as e2:
-                    logger.error(f"predict() also failed frame {idx}: {e2} — skip")
-                    continue
+                logger.error(f"track() failed frame {idx}: {e} — skip")
+                continue
 
             # ── Parse results ─────────────────────────────────────────────────
-            boxes_obj     = results[0].boxes
-            fish_in_frame = len(boxes_obj) if boxes_obj else 0
-            track_ids: list = []
+            boxes_list    = results.get("boxes", [])
+            confs_list    = results.get("confidences", [])
+            track_ids     = results.get("track_ids", [])
+            unique_so_far = results.get("total_counted", 0)
+            fish_in_frame = len(boxes_list)
+            
             new_fish = 0
-
-            if boxes_obj is not None and boxes_obj.id is not None:
-                for tid in boxes_obj.id.cpu().numpy().tolist():
-                    tid_int = int(tid)
-                    track_ids.append(tid_int)
-                    if tid_int not in seen_ids:
-                        seen_ids.add(tid_int)
-                        new_fish += 1
-
-            unique_so_far = len(seen_ids)
-            boxes_list = boxes_obj.xyxy.cpu().numpy().tolist() if fish_in_frame > 0 else []
-            confs_list  = boxes_obj.conf.cpu().numpy().tolist() if fish_in_frame > 0 else []
+            for tid in track_ids:
+                if tid not in seen_ids:
+                    seen_ids.add(tid)
+                    new_fish += 1
 
             detections.append({
                 "frame_idx":           idx,
@@ -231,7 +222,7 @@ class DetectionWorker(QThread):
 
         # ── Finalize ──────────────────────────────────────────────────────────
         self.detections = detections
-        unique_fish = len(seen_ids)
+        unique_fish = self.detector.tracker.total_counted if hasattr(self.detector, 'tracker') else len(seen_ids)
         n_proc      = len(detections)
         avg         = round(sum(d["fish_count"] for d in detections) / n_proc, 2) \
                       if n_proc else 0
@@ -303,7 +294,7 @@ class CameraWorker(QThread):
         seen_ids:      set = set()
         frame_number:  int = 0
         tracker_epoch: int = 0
-        self.detector.reset_tracker()
+        self.detector.reset_tracker(full=True)
         logger.info(
             f"CameraWorker started — source={source_label}, "
             f"conf={self.confidence}, threshold={self.threshold}"
@@ -332,28 +323,19 @@ class CameraWorker(QThread):
                 try:
                     results = self.detector.track(frame, self.confidence)
                 except Exception as e:
-                    logger.warning(f"track() failed frame {frame_number}: {e} — falling back")
-                    try:
-                        results = self.detector.predict(frame, self.confidence)
-                    except Exception as e2:
-                        logger.error(f"predict() also failed frame {frame_number}: {e2} — skip")
-                        frame_number += 1
-                        continue
+                    logger.error(f"track() failed frame {frame_number}: {e} — skip")
+                    frame_number += 1
+                    continue
 
                 # ── Parse results ─────────────────────────────────────────────
-                boxes_obj     = results[0].boxes
-                fish_in_frame = len(boxes_obj) if boxes_obj else 0
-                track_ids: list = []
-
-                if boxes_obj is not None and boxes_obj.id is not None:
-                    for tid in boxes_obj.id.cpu().numpy().tolist():
-                        tid_int = int(tid)
-                        track_ids.append(tid_int)
-                        seen_ids.add(tid_int)
-
-                unique_so_far = len(seen_ids)
-                boxes_list = boxes_obj.xyxy.cpu().numpy().tolist() if fish_in_frame > 0 else []
-                confs_list  = boxes_obj.conf.cpu().numpy().tolist() if fish_in_frame > 0 else []
+                boxes_list    = results.get("boxes", [])
+                confs_list    = results.get("confidences", [])
+                track_ids     = results.get("track_ids", [])
+                unique_so_far = results.get("total_counted", 0)
+                fish_in_frame = len(boxes_list)
+                
+                for tid in track_ids:
+                    seen_ids.add(tid)
 
                 # ── Annotate frame ────────────────────────────────────────────
                 annotated = make_preview_frame(
@@ -381,13 +363,14 @@ class CameraWorker(QThread):
 
         finally:
             cap.release()
+            total_counted_now = self.detector.tracker.total_counted if hasattr(self.detector, 'tracker') else len(seen_ids)
             logger.info(
                 f"CameraWorker stopped — frames: {frame_number}, "
-                f"unique fish: {len(seen_ids)}"
+                f"unique fish: {total_counted_now}"
             )
             self.camera_stopped.emit({
                 "total_frames":      frame_number,
-                "total_fish":        len(seen_ids),
+                "total_fish":        total_counted_now,
                 "threshold_reached": (
                     self.threshold is not None and len(seen_ids) >= self.threshold
                 ),
@@ -1041,6 +1024,9 @@ class FishDetectionApp(QMainWindow):
         self.jump_spin.setEnabled(False)
         self.jump_btn.setEnabled(False)
         self.statusBar().showMessage("Cleared")
+        
+        # Reset tracker to 0
+        self.detector.reset_tracker(full=True)
 
         # Relay: reset all indicators to OFF
         if self.gpio:
